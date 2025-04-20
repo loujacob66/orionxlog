@@ -1,36 +1,38 @@
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__) + "/.."))
-
 import streamlit as st
+from Explore import render as render_explore
+from Upload import render as render_upload
 import pandas as pd
 import sqlite3
-from app.Explore import render as render_explore
 
-st.set_page_config(page_title="OrionX Podcast Trends", layout="wide")
-st.write("✅ Home.py is executing — version updated!")
+st.set_page_config(layout="wide")
 
-DB_PATH = "data/podcasts.db"
+def load_db():
+    db_path = "data/podcasts.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        df = pd.read_sql_query("SELECT * FROM podcasts", conn)
+        conn.close()
+        return df
+    except Exception as e:
+        st.error(f"Failed to load database: {e}")
+        return pd.DataFrame()
 
-@st.cache_data(ttl=60)
-def load_data():
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query("SELECT * FROM podcasts", conn)
-    conn.close()
-    return df
-
-# Load data
 st.title("📊 OrionX Podcast Trends")
-df = load_data()
 
-# Tabs
-explore_tab, raw_tab, upload_tab = st.tabs(["Explore Data", "Raw Table View", "Upload Data"])
+df = load_db()
+tab1, tab2, tab3 = st.tabs(["Explore Data", "Raw Table View", "Upload Data"])
 
-with explore_tab:
-    render_explore(df)
+with tab1:
+    if not df.empty:
+        render_explore(df)
+    else:
+        st.warning("No data found. Try uploading an Excel file in the Upload tab.")
 
-with raw_tab:
-    st.dataframe(df)
+with tab2:
+    if not df.empty:
+        st.dataframe(df)
+    else:
+        st.info("No data to display.")
 
-with upload_tab:
-    st.write("📤 Upload tab placeholder (future functionality)")
+with tab3:
+    render_upload()
