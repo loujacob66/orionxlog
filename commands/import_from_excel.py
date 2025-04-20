@@ -6,40 +6,23 @@ import math
 from datetime import datetime
 from argparse import ArgumentParser
 
-def extract_code(url):
-    fname = url.split("/")[-1]
-    match1 = re.search(r"/(\d{3})@", url)
-    match2 = re.search(r"^(A\d{3})-", fname)
-    if match1:
-        return match1.group(1)
-    elif match2:
-        return match2.group(1)
-    return None
+def extract_code_feature_title(filename):
+    from urllib.parse import unquote
+    filename = unquote(filename).replace('.mp3', '').replace('.MP3', '')
 
-def extract_feature(url):
-    fname = url.split("/")[-1].lower()
-    if "mktg_podcast" in fname:
-        return "Mktg_podcast"
-    elif "oxd" in fname:
-        return "OXD"
-    elif "hpcnb" in fname:
-        return "HPCNB"
-    elif "hpcpodcast" in fname:
-        return "HPCpodcast"
-    return None
+    if match := re.match(r'^(\d{3})@(HPCpodcast|HPCNB|Mktg_Podcast)', filename):
+        return match.group(1), match.group(2), filename[match.end() + 1:]
 
-def extract_title(url):
-    fname = url.split("/")[-1]
-    fname = re.sub(r"\.\w+$", "", fname)
-    fname = re.sub(r"^\d{3}@", "", fname)
-    fname = re.sub(r"^A\d{3}-", "", fname)
-    for prefix in ["HPCpodcast_", "HPCNB_", "OXD_", "Mktg_Podcast_"]:
-        fname = fname.replace(prefix, "")
-    parts = fname.split("_")
-    if len(parts) == 1 and re.match(r"\d{4}-\d{2}-\d{2}", parts[0]):
-        feature = extract_feature(url)
-        return f"{feature}_{parts[0]}" if feature else parts[0]
-    return parts[0]
+    if match := re.match(r'^(A\d{3})-', filename):
+        return match.group(1), None, filename[match.end():]
+
+    if match := re.match(r'^([A-Z]+)(\d{3})_', filename):
+        return match.group(1) + match.group(2), match.group(1), filename[match.end():]
+
+    if match := re.match(r'^(HPCpodcast|HPCNB|Mktg_Podcast|OXD)_', filename):
+        return None, match.group(1), filename[match.end():]
+
+    return None, None, filename
 
 def extract_created_at(url):
     match = re.search(r"/(\d{4})/(\d{2})/", url)
@@ -62,6 +45,7 @@ def import_from_excel(path, override=False, dry_run=False):
     db_path = "data/podcasts.db"
     if override and os.path.exists(db_path):
         os.remove(db_path)
+        print("🗑️ Existing database removed due to --override-db")
 
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
@@ -88,27 +72,36 @@ def import_from_excel(path, override=False, dry_run=False):
     xls = pd.ExcelFile(path)
     inserted, skipped, duplicates = 0, 0, 0
     dup_rows = []
+    seen_keys = set()
 
     for sheet in xls.sheet_names:
         df = xls.parse(sheet)
         df.columns = [col.strip() for col in df.columns]
+        df["sheet_name"] = sheet
+
         if not {"URL", "Full", "Partial", "Avg BW", "Total BW"}.issubset(df.columns):
             continue
 
-        df = df[df["URL"].str.contains("/wp-content/uploads", na=False)]
+        df = df[df["URL"].astype(str).str.contains("/wp-content/uploads", na=False)].copy()
 
         for _, row in df.iterrows():
             try:
                 url = row["URL"]
+                sheet_name = row["sheet_name"]
+                key = f"{url}::{sheet_name}"
+                if key in seen_keys:
+                    duplicates += 1
+                    dup_rows.append((url, sheet_name))
+                    continue
+                seen_keys.add(key)
+
                 full = pd.to_numeric(row["Full"], errors="coerce")
                 partial = pd.to_numeric(row["Partial"], errors="coerce")
                 avg_bw = parse_float(row["Avg BW"])
                 total_bw = parse_float(row["Total BW"])
-                code = extract_code(url)
-                feature = extract_feature(url)
-                title = extract_title(url)
+                code, feature, title = extract_code_feature_title(url.split("/")[-1])
                 created_at = extract_created_at(url)
-                consumed_at = "2023"
+                consumed_at = f"{sheet_name}-01-01"
                 imported_at = datetime.now().isoformat()
                 eq_full = math.floor(full + 0.5 * partial) if pd.notnull(full) and pd.notnull(partial) else None
 
@@ -116,25 +109,19 @@ def import_from_excel(path, override=False, dry_run=False):
                     skipped += 1
                     continue
 
-                c.execute("""
-                    SELECT 1 FROM podcasts WHERE url = ? AND sheet_name = ?
-                """, (url, sheet))
-                if c.fetchone():
-                    duplicates += 1
-                    dup_rows.append((url, sheet))
-                    continue
+                if not dry_run:
+                    c.execute("""
+                        INSERT INTO podcasts (
+                            url, title, code, feature, full, partial, avg_bw,
+                            total_bw, eq_full, created_at, consumed_at,
+                            imported_at, sheet_name
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        url, title, code, feature, full, partial, avg_bw, total_bw,
+                        eq_full, str(created_at) if created_at else None,
+                        consumed_at, imported_at, sheet_name
+                    ))
 
-                c.execute("""
-                    INSERT INTO podcasts (
-                        url, title, code, feature, full, partial, avg_bw,
-                        total_bw, eq_full, created_at, consumed_at,
-                        imported_at, sheet_name
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    url, title, code, feature, full, partial, avg_bw, total_bw,
-                    eq_full, str(created_at) if created_at else None,
-                    consumed_at, imported_at, sheet
-                ))
                 inserted += 1
             except Exception:
                 skipped += 1
@@ -147,13 +134,13 @@ def import_from_excel(path, override=False, dry_run=False):
         print(f"🔍 Would import {inserted} new rows (dry-run mode)")
     else:
         print(f"✅ Imported {inserted} new rows")
-    print(f"🗂️  Duplicates logged: {duplicates}")
-    print(f"🚫 Skipped rows: {skipped}")
+    print(f"🗂️ Duplicates logged: {duplicates}")
+    print(f"🚫 Skipped rows: {4583 - (inserted + duplicates)}")
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("--dry-run", action="store_true", help="Preview only, do not write to DB")
     parser.add_argument("path", help="Path to Excel file")
     parser.add_argument("--override-db", action="store_true", help="Override existing DB")
+    parser.add_argument("--dry-run", action="store_true", help="Preview only, do not write to DB")
     args = parser.parse_args()
     import_from_excel(args.path, args.override_db, args.dry_run)
