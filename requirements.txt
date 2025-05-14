@@ -38,3 +38,5 @@ typing_extensions==4.13.2
 tzdata==2025.2
 urllib3==2.4.0
 watchdog==6.0.0
+streamlit-authenticator>=0.2.2
+pyyaml>=6.0.0

@@ -415,7 +415,7 @@ def read_excel_with_hyperlinks(filepath: str, sheet_name: str) -> pd.DataFrame:
     print(f"Total rows skipped: {skipped_count}")
     return df
 
-def import_data(filepath: str, override: bool = False, dry_run: bool = False) -> None:
+def import_data(filepath: str, override: bool = False, dry_run: bool = False, reset_db: bool = False) -> dict:
     """
     Import podcast data from Excel files into SQLite database.
     
@@ -423,6 +423,7 @@ def import_data(filepath: str, override: bool = False, dry_run: bool = False) ->
         filepath: Path to the Excel file
         override: Whether to override existing database
         dry_run: Whether to perform a dry run (no actual database changes)
+        reset_db: Whether to reset the database before import
     """
     db_path = "data/podcasts.db"
     filename_only = os.path.basename(filepath)
@@ -432,8 +433,8 @@ def import_data(filepath: str, override: bool = False, dry_run: bool = False) ->
         print(f"Error: Could not automatically determine file type for '{filename_only}'.")
         return
 
-    if override and os.path.exists(db_path) and not dry_run:
-        print(f"🗑️ Removing existing database {db_path} due to --override-db flag.")
+    if reset_db and os.path.exists(db_path) and not dry_run:
+        print(f"🗑️ Removing existing database {db_path} due to --reset-db flag.")
         os.remove(db_path)
 
     # Create database and table
@@ -750,10 +751,13 @@ def import_data(filepath: str, override: bool = False, dry_run: bool = False) ->
     
     print("-"*70)
 
+    return stats
+
 if __name__ == "__main__":
     parser = ArgumentParser(description="Import podcast data from Excel files into SQLite database.") # Keep description generic or update
     parser.add_argument("filepath", help="Path to Excel file") # Or more generic "Path to data file"
     parser.add_argument("--override-db", action="store_true", help="Delete and recreate the database before import. Use with caution.")
     parser.add_argument("--dry-run", action="store_true", help="Preview actions only; no changes will be made to the database.")
+    parser.add_argument("--reset-db", action="store_true", help="Reset the database before import. Use with caution.")
     args = parser.parse_args()
-    import_data(args.filepath, args.override_db, args.dry_run) # Call renamed function 
+    import_data(args.filepath, args.override_db, args.dry_run, args.reset_db) # Call renamed function 

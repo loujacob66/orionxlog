@@ -4,15 +4,31 @@ import os
 import io # For capturing stdout
 import sys # For redirecting stdout
 from datetime import datetime # For timestamping
-
-# --- Path Fix ---
 # Add the project root to the Python path to allow importing from 'scripts'
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-# --- End Path Fix ---
-
+from app.authentication import get_authenticator
 from scripts.import_data import import_data # Import the core function
+
+if __name__ == "__main__":
+    st.set_page_config(layout="wide", page_title="Upload Data", page_icon="⬆️")
+
+# --- Authentication ---
+authenticator, _ = get_authenticator()
+name, authentication_status, username = authenticator.login(
+    fields={'form_name': 'Upload Login', 'location': 'main'}
+)
+if authentication_status == False:
+    st.error('Username/password is incorrect')
+    st.stop()
+elif authentication_status == None:
+    st.warning('Please enter your username and password')
+    st.stop()
+else:
+    if authenticator.logout(button_name='Logout', location='sidebar', key='logout-upload'):
+        st.rerun()
+    st.sidebar.write(f'Welcome *{name}*')
 
 # --- Column Configuration ---
 COLUMNS_TO_DISPLAY = [
@@ -39,12 +55,29 @@ COLUMN_CONFIG = {
     "url": st.column_config.TextColumn("URL", width=400)
 }
 
+def get_import_action_summary(override_db, reset_db, perform_dry_run):
+    if perform_dry_run:
+        if reset_db:
+            return ("This was a dry run. No changes were made to the database.\nIf this were not a dry run: The entire database would be deleted before import. Only data from this file would remain after import.")
+        elif override_db:
+            return ("This was a dry run. No changes were made to the database.\nIf this were not a dry run: Rows for the same period (month/year) would be overwritten. All other data would remain unchanged.")
+        else:
+            return ("This was a dry run. No changes were made to the database.\nIf this were not a dry run: New rows would be added. Existing rows for the same period would be ignored (not overwritten). All other data would remain unchanged.")
+    else:
+        if reset_db:
+            return ("The entire database was deleted before import. Only data from this file remains after import.")
+        elif override_db:
+            return ("Rows for the same period (month/year) were overwritten. All other data remains unchanged.")
+        else:
+            return ("New rows were added. Existing rows for the same period were ignored (not overwritten). All other data remains unchanged.")
+
 def render():
     # Removed: st.set_page_config(layout="wide") # This was causing the error when called from Home.py
     st.subheader("Upload & Import Excel File")
 
     uploaded_file = st.file_uploader("Choose an Excel file (.xlsx, .xls)", type=["xlsx", "xls"])
-    override_db = st.checkbox("Override existing database if it exists")
+    override_db = st.checkbox("Overwrite rows for the same period (safe, default behavior)")
+    reset_db = st.checkbox("Reset entire database (dangerous! Deletes all data before import)")
     perform_dry_run = st.checkbox("Perform a dry run (preview only, no actual database changes)")
 
     # Define the permanent storage directory for uploads
@@ -80,6 +113,8 @@ def render():
             st.error(f"Failed to save uploaded file to {saved_filepath}. Error: {e}")
             return
 
+        st.markdown(f"**Action Preview:** {get_import_action_summary(override_db, reset_db, perform_dry_run)}")
+
         if st.button("Start Import Process"):
             st.info("Import process started...")
             output_capture = io.StringIO()
@@ -88,28 +123,29 @@ def render():
 
             try:
                 with st.spinner("Processing file and importing data..."):
-                    # Call the import_data function with the path to the permanently saved file
-                    import_data(filepath=saved_filepath, override=override_db, dry_run=perform_dry_run)
-                
-                sys.stdout = original_stdout # Restore stdout
-                script_output = output_capture.getvalue()
-                
+                    # Call the import_data function and get stats
+                    stats = import_data(filepath=saved_filepath, override=override_db, dry_run=perform_dry_run, reset_db=reset_db)
+                sys.stdout = original_stdout  # Restore stdout
                 st.success("Import process completed!")
-                st.subheader("Import Log & Summary:")
-                st.text_area("Output", script_output, height=600) # Use text_area for scrollable, raw output
-
+                st.subheader("Import Summary:")
+                st.markdown(f"**Action Taken:** {get_import_action_summary(override_db, reset_db, perform_dry_run)}")
+                if stats:
+                    st.markdown(f"**Sheets processed:** {stats['sheets']['processed']} / {stats['sheets']['total']}")
+                    st.markdown(f"**Rows scanned:** {stats['rows']['scanned']}")
+                    st.markdown(f"**Rows merged:** {stats['rows']['merged']}")
+                    st.markdown(f"**Rows with errors:** {stats['rows']['errors']}")
+                    st.markdown(f"**Dry run:** {perform_dry_run}")
+                    st.markdown(f"**Inserted:** {stats['actual']['inserted']}")
+                    st.markdown(f"**Replaced:** {stats['actual']['replaced']}")
+                    st.markdown(f"**Ignored:** {stats['actual']['ignored']}")
+                else:
+                    st.warning("No summary stats returned from import.")
             except Exception as e:
-                sys.stdout = original_stdout # Ensure stdout is restored on error
-                script_output = output_capture.getvalue()
+                sys.stdout = original_stdout  # Ensure stdout is restored on error
                 st.error(f"An error occurred during the import process: {e}")
-                if script_output:
-                    st.subheader("Output before error:")
-                    st.text_area("Output", script_output, height=300)
             finally:
-                sys.stdout = original_stdout # Ensure stdout is restored in all cases
+                sys.stdout = original_stdout  # Ensure stdout is restored in all cases
                 output_capture.close()
-                # No longer removing the file as it's meant to be stored permanently
-                # st.caption(f"File {saved_filepath} is stored permanently.") # Optional: inform user again
     else:
         st.markdown("Please upload an Excel file to begin the import process.")
 

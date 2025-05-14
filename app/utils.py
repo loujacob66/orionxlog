@@ -31,10 +31,10 @@ def load_db():
             return pd.DataFrame()
 
         # Debug: Print the SQL query result
-        print("Loading data from database...")
+        # print("Loading data from database...")
         df = pd.read_sql_query("SELECT * FROM podcasts", conn)
-        print(f"Loaded {len(df)} rows from database")
-        print("Years in data:", sorted(df["consumed_year"].unique().tolist()))
+        # print(f"Loaded {len(df)} rows from database")
+        # print("Years in data:", sorted(df["consumed_year"].unique().tolist()))
         
         # Ensure consumed_year is numeric
         df["consumed_year"] = pd.to_numeric(df["consumed_year"], errors='coerce')

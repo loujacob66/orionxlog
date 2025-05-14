@@ -1,9 +1,31 @@
 import streamlit as st
+st.set_page_config(layout="wide", page_title="Podcast Analytics", page_icon="📊")
 import pandas as pd
 import sqlite3
 import os
 import sys
+# Add the project root to the Python path to allow importing from 'app'
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 import plotly.express as px
+from app.authentication import get_authenticator
+
+# --- Authentication ---
+authenticator, _ = get_authenticator()
+name, authentication_status, username = authenticator.login(
+    fields={'form_name': 'Analytics Login', 'location': 'main'}
+)
+if authentication_status == False:
+    st.error('Username/password is incorrect')
+    st.stop()
+elif authentication_status == None:
+    st.warning('Please enter your username and password')
+    st.stop()
+else:
+    if authenticator.logout(button_name='Logout', location='sidebar', key='logout-analytics'):
+        st.rerun()
+    st.sidebar.write(f'Welcome *{name}*')
 
 # --- Path Fix ---
 # Add the project root to the Python path to allow importing from 'scripts' if needed by helper functions
@@ -14,7 +36,6 @@ if project_root not in sys.path:
 # --- End Path Fix ---
 
 # --- Page Configuration ---
-# st.set_page_config(layout="wide", page_title="Podcast Analytics", page_icon="📊")
 # Page config is set in Home.py or by Streamlit for multipage apps; remove from individual pages if not the main script.
 
 # --- Column Configuration ---
@@ -35,7 +56,7 @@ COLUMN_CONFIG = {
     "avg_bw": st.column_config.NumberColumn("Avg BW (MB)", width=90, format="%.2f"),
     "total_bw": st.column_config.NumberColumn("Total BW (MB)", width=90, format="%.2f"),
     "created_at": st.column_config.DatetimeColumn("Created At", width=100, format="YYYY-MM-DD"),
-    "consumed_at": st.column_config.DatetimeColumn("Viewed At", width=1050, format="YYYY-MM-DD"),
+    "consumed_at": st.column_config.DatetimeColumn("Viewed At", width=100, format="YYYY-MM-DD"),
     "consumed_year": st.column_config.NumberColumn("Viewed Year", width=60, format="%d"),
     "consumed_month": st.column_config.NumberColumn("Viewed Month", width=90, format="%d"),
     "source_file_path": st.column_config.TextColumn("Source File", width=200),

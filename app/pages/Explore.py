@@ -1,15 +1,31 @@
 import streamlit as st
+st.set_page_config(layout="wide", page_title="Explore Data", page_icon="🔍")
 import pandas as pd
 import os # Required for path operations if we were to build path here
 import sys # Required for sys.path manipulation
-
 # Ensure app.utils can be imported
 # Assuming Explore.py is in app/pages/, then ../.. is project root
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
-
+from app.authentication import get_authenticator
 from app.utils import load_db # Import load_db
+
+# --- Authentication ---
+authenticator, _ = get_authenticator()
+name, authentication_status, username = authenticator.login(
+    fields={'form_name': 'Explore Login', 'location': 'main'}
+)
+if authentication_status == False:
+    st.error('Username/password is incorrect')
+    st.stop()
+elif authentication_status == None:
+    st.warning('Please enter your username and password')
+    st.stop()
+else:
+    if authenticator.logout(button_name='Logout', location='sidebar', key='logout-explore'):
+        st.rerun()
+    st.sidebar.write(f'Welcome *{name}*')
 
 # --- Column Configuration ---
 COLUMNS_TO_DISPLAY = [
@@ -21,17 +37,17 @@ COLUMNS_TO_DISPLAY = [
 # Define column configurations with widths and formatting
 COLUMN_CONFIG = {
     "title": st.column_config.TextColumn("Title", width=300),
-    "feature": st.column_config.TextColumn("Feature", width=150),
-    "code": st.column_config.TextColumn("Code", width=100),
-    "eq_full": st.column_config.NumberColumn("Eq. Full", width=100, format="%d"),
-    "full": st.column_config.NumberColumn("Full", width=100, format="%d"),
-    "partial": st.column_config.NumberColumn("Partial", width=100, format="%d"),
-    "avg_bw": st.column_config.NumberColumn("Avg BW (MB)", width=120, format="%.2f"),
-    "total_bw": st.column_config.NumberColumn("Total BW (MB)", width=120, format="%.2f"),
-    "created_at": st.column_config.DatetimeColumn("Created At", width=150, format="YYYY-MM-DD"),
-    "consumed_at": st.column_config.DatetimeColumn("Consumed At", width=150, format="YYYY-MM-DD"),
-    "consumed_year": st.column_config.NumberColumn("Year", width=80, format="%d"),
-    "consumed_month": st.column_config.NumberColumn("Month", width=80, format="%d"),
+    "feature": st.column_config.TextColumn("Feature", width=100),
+    "code": st.column_config.TextColumn("Code", width=50),
+    "eq_full": st.column_config.NumberColumn("Eq. Full", width=60, format="%d"),
+    "full": st.column_config.NumberColumn("Full", width=75, format="%d"),
+    "partial": st.column_config.NumberColumn("Partial", width=75, format="%d"),
+    "avg_bw": st.column_config.NumberColumn("Avg BW (MB)", width=90, format="%.2f"),
+    "total_bw": st.column_config.NumberColumn("Total BW (MB)", width=90, format="%.2f"),
+    "created_at": st.column_config.DatetimeColumn("Created At", width=100, format="YYYY-MM-DD"),
+    "consumed_at": st.column_config.DatetimeColumn("Consumed At", width=100, format="YYYY-MM-DD"),
+    "consumed_year": st.column_config.NumberColumn("Year", width=60, format="%d"),
+    "consumed_month": st.column_config.NumberColumn("Month", width=90, format="%d"),
     "source_file_path": st.column_config.TextColumn("Source File", width=200),
     "url": st.column_config.TextColumn("URL", width=400)
 }
@@ -127,5 +143,7 @@ def render(df=None):
 
 # Call render when the page is accessed directly.
 # Home.py will call render(df) for its tab.
-if __name__ == "__main__":
-    render() 
+# Remove the if __name__ == "__main__": block at the bottom
+# Home.py will call render(df) for its tab. 
+
+render() 
