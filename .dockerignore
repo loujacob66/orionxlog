@@ -1,0 +1,11 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+.DS_Store
+logs/*
+data/podcasts.db
+temp/
+.vscode/
+.idea/ 

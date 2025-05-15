@@ -1,5 +1,15 @@
 import streamlit as st
 st.set_page_config(page_title="User Management", layout="wide", page_icon="👤")
+
+# Add CSS to hide sidebar initially
+st.markdown("""
+    <style>
+        section[data-testid="stSidebar"] {
+            display: none;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 import streamlit_authenticator as stauth
 import yaml
 from yaml.loader import SafeLoader
@@ -27,6 +37,15 @@ elif authentication_status == None:
     st.warning('Please enter your username and password')
     st.stop()
 else:
+    # Show the sidebar after successful authentication
+    st.markdown("""
+        <style>
+            section[data-testid="stSidebar"] {
+                display: block;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+    
     if authenticator.logout(button_name='Logout', location='sidebar', key='logout-user-management'):
         st.rerun()
     st.sidebar.write(f'Welcome *{name}*')

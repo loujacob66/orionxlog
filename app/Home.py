@@ -1,5 +1,15 @@
 import streamlit as st
 st.set_page_config(layout="wide", page_title="OrionX Podcast Trends", page_icon="📊")
+
+# Add CSS to hide sidebar initially
+st.markdown("""
+    <style>
+        section[data-testid="stSidebar"] {
+            display: none;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 import pandas as pd
 import sqlite3
 import os
@@ -52,6 +62,15 @@ elif authentication_status == None:
     st.warning('Please enter your username and password')
     st.stop()
 else:
+    # Show the sidebar after successful authentication
+    st.markdown("""
+        <style>
+            section[data-testid="stSidebar"] {
+                display: block;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+    
     # User is authenticated
     if authenticator.logout(button_name='Logout', location='sidebar', key='logout-main'):
         st.rerun()

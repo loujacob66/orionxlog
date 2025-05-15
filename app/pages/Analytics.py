@@ -1,5 +1,15 @@
 import streamlit as st
 st.set_page_config(layout="wide", page_title="Podcast Analytics", page_icon="📊")
+
+# Add CSS to hide sidebar initially
+st.markdown("""
+    <style>
+        section[data-testid="stSidebar"] {
+            display: none;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 import pandas as pd
 import sqlite3
 import os
@@ -23,6 +33,15 @@ elif authentication_status == None:
     st.warning('Please enter your username and password')
     st.stop()
 else:
+    # Show the sidebar after successful authentication
+    st.markdown("""
+        <style>
+            section[data-testid="stSidebar"] {
+                display: block;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+    
     if authenticator.logout(button_name='Logout', location='sidebar', key='logout-analytics'):
         st.rerun()
     st.sidebar.write(f'Welcome *{name}*')
@@ -129,11 +148,15 @@ def render(): # Changed function name to render for consistency with other pages
         max_year_val = df_filtered['consumed_year'].dropna().max()
         if pd.notna(min_year_val) and pd.notna(max_year_val):
             min_year, max_year = int(min_year_val), int(max_year_val)
-            selected_years = st.sidebar.slider(
-                "Consumption Year Range",
-                min_year, max_year,
-                (min_year, max_year)
-            )
+            if min_year == max_year:
+                selected_years = (min_year, max_year)
+                st.sidebar.write(f"Only data for year {min_year} is available.")
+            else:
+                selected_years = st.sidebar.slider(
+                    "Consumption Year Range",
+                    min_year, max_year,
+                    (min_year, max_year)
+                )
             df_filtered = df_filtered[(df_filtered['consumed_year'] >= selected_years[0]) & (df_filtered['consumed_year'] <= selected_years[1])]
         else:
             st.sidebar.caption("Could not determine year range for filtering.")

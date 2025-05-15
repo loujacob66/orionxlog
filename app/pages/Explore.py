@@ -1,5 +1,15 @@
 import streamlit as st
 st.set_page_config(layout="wide", page_title="Explore Data", page_icon="🔍")
+
+# Add CSS to hide sidebar initially
+st.markdown("""
+    <style>
+        section[data-testid="stSidebar"] {
+            display: none;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 import pandas as pd
 import os # Required for path operations if we were to build path here
 import sys # Required for sys.path manipulation
@@ -23,6 +33,15 @@ elif authentication_status == None:
     st.warning('Please enter your username and password')
     st.stop()
 else:
+    # Show the sidebar after successful authentication
+    st.markdown("""
+        <style>
+            section[data-testid="stSidebar"] {
+                display: block;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+    
     if authenticator.logout(button_name='Logout', location='sidebar', key='logout-explore'):
         st.rerun()
     st.sidebar.write(f'Welcome *{name}*')

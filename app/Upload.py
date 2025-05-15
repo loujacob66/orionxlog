@@ -75,7 +75,7 @@ def render():
     # Removed: st.set_page_config(layout="wide") # This was causing the error when called from Home.py
     st.subheader("Upload & Import Excel File")
 
-    uploaded_file = st.file_uploader("Choose an Excel file (.xlsx, .xls)", type=["xlsx", "xls"])
+    uploaded_files = st.file_uploader("Choose Excel files (.xlsx, .xls)", type=["xlsx", "xls"], accept_multiple_files=True)
     override_db = st.checkbox("Overwrite rows for the same period (safe, default behavior)")
     reset_db = st.checkbox("Reset entire database (dangerous! Deletes all data before import)")
     perform_dry_run = st.checkbox("Perform a dry run (preview only, no actual database changes)")
@@ -83,7 +83,7 @@ def render():
     # Define the permanent storage directory for uploads
     permanent_upload_dir = os.path.join("data", "uploaded")
 
-    if uploaded_file is not None:
+    if uploaded_files:
         # Ensure the permanent upload directory exists
         if not os.path.exists(permanent_upload_dir):
             try:
@@ -93,26 +93,6 @@ def render():
                 st.error(f"Could not create directory {permanent_upload_dir} for storing uploads. Error: {e}")
                 return # Stop further processing if directory can't be made
 
-        # Generate new filename with appended, more readable timestamp
-        original_filename_full = uploaded_file.name
-        base, ext = os.path.splitext(original_filename_full)
-        # Sanitize base filename (e.g., replace spaces with underscores)
-        safe_base_filename = base.replace(" ", "_").replace("/", "_") # Add other sanitizations if needed
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") # More readable format
-        new_filename = f"{safe_base_filename}_{timestamp}{ext}"
-        
-        saved_filepath = os.path.join(permanent_upload_dir, new_filename)
-
-        # Save the uploaded file to the permanent location
-        try:
-            with open(saved_filepath, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            st.info(f"File saved as: {saved_filepath}")
-        except IOError as e:
-            st.error(f"Failed to save uploaded file to {saved_filepath}. Error: {e}")
-            return
-
         st.markdown(f"**Action Preview:** {get_import_action_summary(override_db, reset_db, perform_dry_run)}")
 
         if st.button("Start Import Process"):
@@ -121,25 +101,63 @@ def render():
             original_stdout = sys.stdout
             sys.stdout = output_capture
 
+            total_stats = {
+                'sheets': {'processed': 0, 'total': 0},
+                'rows': {'scanned': 0, 'merged': 0, 'errors': 0},
+                'actual': {'inserted': 0, 'replaced': 0, 'ignored': 0}
+            }
+
             try:
-                with st.spinner("Processing file and importing data..."):
-                    # Call the import_data function and get stats
-                    stats = import_data(filepath=saved_filepath, override=override_db, dry_run=perform_dry_run, reset_db=reset_db)
+                for idx, uploaded_file in enumerate(uploaded_files):
+                    # Generate new filename with appended, more readable timestamp
+                    original_filename_full = uploaded_file.name
+                    base, ext = os.path.splitext(original_filename_full)
+                    # Sanitize base filename (e.g., replace spaces with underscores)
+                    safe_base_filename = base.replace(" ", "_").replace("/", "_") # Add other sanitizations if needed
+                    
+                    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") # More readable format
+                    new_filename = f"{safe_base_filename}_{timestamp}{ext}"
+                    
+                    saved_filepath = os.path.join(permanent_upload_dir, new_filename)
+
+                    # Save the uploaded file to the permanent location
+                    try:
+                        with open(saved_filepath, "wb") as f:
+                            f.write(uploaded_file.getbuffer())
+                        st.info(f"File saved as: {saved_filepath}")
+                    except IOError as e:
+                        st.error(f"Failed to save uploaded file to {saved_filepath}. Error: {e}")
+                        continue
+
+                    with st.spinner(f"Processing file {uploaded_file.name}..."):
+                        # Only reset DB for the first file
+                        reset_flag = reset_db if idx == 0 else False
+                        stats = import_data(filepath=saved_filepath, override=override_db, dry_run=perform_dry_run, reset_db=reset_flag)
+                        
+                        if stats:
+                            # Accumulate stats
+                            total_stats['sheets']['processed'] += stats['sheets']['processed']
+                            total_stats['sheets']['total'] += stats['sheets']['total']
+                            total_stats['rows']['scanned'] += stats['rows']['scanned']
+                            total_stats['rows']['merged'] += stats['rows']['merged']
+                            total_stats['rows']['errors'] += stats['rows']['errors']
+                            total_stats['actual']['inserted'] += stats['actual']['inserted']
+                            total_stats['actual']['replaced'] += stats['actual']['replaced']
+                            total_stats['actual']['ignored'] += stats['actual']['ignored']
+
                 sys.stdout = original_stdout  # Restore stdout
                 st.success("Import process completed!")
                 st.subheader("Import Summary:")
                 st.markdown(f"**Action Taken:** {get_import_action_summary(override_db, reset_db, perform_dry_run)}")
-                if stats:
-                    st.markdown(f"**Sheets processed:** {stats['sheets']['processed']} / {stats['sheets']['total']}")
-                    st.markdown(f"**Rows scanned:** {stats['rows']['scanned']}")
-                    st.markdown(f"**Rows merged:** {stats['rows']['merged']}")
-                    st.markdown(f"**Rows with errors:** {stats['rows']['errors']}")
-                    st.markdown(f"**Dry run:** {perform_dry_run}")
-                    st.markdown(f"**Inserted:** {stats['actual']['inserted']}")
-                    st.markdown(f"**Replaced:** {stats['actual']['replaced']}")
-                    st.markdown(f"**Ignored:** {stats['actual']['ignored']}")
-                else:
-                    st.warning("No summary stats returned from import.")
+                st.markdown(f"**Total sheets processed:** {total_stats['sheets']['processed']} / {total_stats['sheets']['total']}")
+                st.markdown(f"**Total rows scanned:** {total_stats['rows']['scanned']}")
+                st.markdown(f"**Total rows merged:** {total_stats['rows']['merged']}")
+                st.markdown(f"**Total rows with errors:** {total_stats['rows']['errors']}")
+                st.markdown(f"**Dry run:** {perform_dry_run}")
+                st.markdown(f"**Total inserted:** {total_stats['actual']['inserted']}")
+                st.markdown(f"**Total replaced:** {total_stats['actual']['replaced']}")
+                st.markdown(f"**Total ignored:** {total_stats['actual']['ignored']}")
+
             except Exception as e:
                 sys.stdout = original_stdout  # Ensure stdout is restored on error
                 st.error(f"An error occurred during the import process: {e}")
@@ -147,7 +165,7 @@ def render():
                 sys.stdout = original_stdout  # Ensure stdout is restored in all cases
                 output_capture.close()
     else:
-        st.markdown("Please upload an Excel file to begin the import process.")
+        st.markdown("Please upload one or more Excel files to begin the import process.")
 
 # To make the page runnable (if this is the main page you test with)
 if __name__ == "__main__":
