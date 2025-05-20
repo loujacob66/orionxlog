@@ -18,9 +18,8 @@ import sys
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
-from authentication import get_authenticator, display_user_management
+from app.authentication import get_authenticator
 from app.utils import load_db 
-from app.Upload import render
 
 # --- Column Configuration ---
 COLUMNS_TO_DISPLAY = [
@@ -76,18 +75,11 @@ else:
         st.rerun()
     st.sidebar.write(f'Welcome *{name}*')
 
-    # --- CHECK FOR USER MANAGEMENT FLAG HERE ---
-    if st.session_state.get('show_user_management'):
-        display_user_management()
-        del st.session_state['show_user_management']
-        st.stop()
-
-    # Add user management page for admin
+    # Add admin dashboard link for admin users
     if username == 'admin':
         st.sidebar.markdown("---")
-        if st.sidebar.button("User Management"):
-            display_user_management()
-            st.stop()  # Stop further execution
+        if st.sidebar.button("Admin Dashboard"):
+            st.switch_page("pages/Admin.py")
 
     st.title("📊 OrionX Podcast Trends")
     df = load_db()
@@ -104,7 +96,7 @@ else:
         df_display = df.copy()
 
     # --- Tabs ---
-    tab1, tab2, tab3 = st.tabs(["Explore Data", "Raw Table View", "Upload Data"])
+    tab1, tab2 = st.tabs(["Explore Data", "Raw Table View"])
 
     with tab1:
         # --- Main Table (match Analytics.py) with Filters ---
@@ -125,11 +117,16 @@ else:
                 max_year_val = df_main['consumed_year'].dropna().max()
                 if pd.notna(min_year_val) and pd.notna(max_year_val):
                     min_year, max_year = int(min_year_val), int(max_year_val)
-                    selected_years = st.sidebar.slider(
-                        "Viewed Year Range",
-                        min_year, max_year,
-                        (min_year, max_year)
-                    )
+                    if min_year == max_year:
+                        # If there's only one year, just use a single value
+                        selected_years = (min_year, min_year)
+                        st.sidebar.caption(f"Data available for year: {min_year}")
+                    else:
+                        selected_years = st.sidebar.slider(
+                            "Viewed Year Range",
+                            min_year, max_year,
+                            (min_year, max_year)
+                        )
                     df_main = df_main[(df_main['consumed_year'] >= selected_years[0]) & (df_main['consumed_year'] <= selected_years[1])]
                 else:
                     st.sidebar.caption("Could not determine year range for filtering.")
@@ -158,7 +155,7 @@ else:
             if 'month_display' in df_main.columns:
                 st.caption('~ = Month assumed from yearly data')
         else:
-            st.warning("No data found. Try uploading an Excel file in the Upload tab.")
+            st.warning("No data found. Please contact an administrator to upload data.")
 
     with tab2:
         # --- Raw Table View: just show the full raw data table, no debug info ---
@@ -187,6 +184,3 @@ else:
                 st.caption('~ = Month assumed from yearly data')
         else:
             st.info("No data to display.")
-
-    with tab3:
-        render()

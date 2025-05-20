@@ -10,6 +10,7 @@ from urllib.parse import unquote
 from openpyxl import load_workbook
 import traceback
 import sys
+import shutil
 from typing import Optional, Tuple, Dict, Any, List
 
 # --- Column Mappings ---
@@ -415,7 +416,24 @@ def read_excel_with_hyperlinks(filepath: str, sheet_name: str) -> pd.DataFrame:
     print(f"Total rows skipped: {skipped_count}")
     return df
 
-def import_data(filepath: str, override: bool = False, dry_run: bool = False, reset_db: bool = False) -> dict:
+def backup_database(db_path: str) -> str:
+    """Create a backup of the database before import.
+    Returns the path to the backup file."""
+    if not os.path.exists(db_path):
+        return None
+    
+    # Create backup filename with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_dir = os.path.join(os.path.dirname(db_path), "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    backup_path = os.path.join(backup_dir, f"podcasts_{timestamp}.db")
+    
+    # Copy the database file
+    shutil.copy2(db_path, backup_path)
+    print(f"Created database backup: {backup_path}")
+    return backup_path
+
+def import_data(filepath: str, override: bool = False, dry_run: bool = False, reset_db: bool = False, skip_backup: bool = False) -> dict:
     """
     Import podcast data from Excel files into SQLite database.
     
@@ -424,6 +442,7 @@ def import_data(filepath: str, override: bool = False, dry_run: bool = False, re
         override: Whether to override existing database
         dry_run: Whether to perform a dry run (no actual database changes)
         reset_db: Whether to reset the database before import
+        skip_backup: Whether to skip creating a backup (used when backup is created externally)
     """
     db_path = "data/podcasts.db"
     filename_only = os.path.basename(filepath)
@@ -489,6 +508,12 @@ def import_data(filepath: str, override: bool = False, dry_run: bool = False, re
             'errors': 0
         }
     }
+
+    # Create backup if database exists and this is not a dry run
+    if not dry_run and os.path.exists(db_path) and not skip_backup:
+        backup_path = backup_database(db_path)
+        if backup_path:
+            print(f"Database backed up to: {backup_path}")
 
     # Determine which sheets to process
     sheets_to_process = all_sheet_names if file_type == "report" else [all_sheet_names[0]] if all_sheet_names else []
