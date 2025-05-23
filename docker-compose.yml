@@ -4,10 +4,12 @@ services:
   web:
     build: .
     ports:
-      - "8701:8501"
+      - "8080:8080"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      - ./config:/app/config
     environment:
       - PYTHONUNBUFFERED=1
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/config/gcs_credentials.json
     restart: unless-stopped 

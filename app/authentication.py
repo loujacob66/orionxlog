@@ -7,7 +7,12 @@ import base64
 
 # Configuration file path
 CONFIG_DIR = "config"
-CONFIG_FILE = os.path.join(CONFIG_DIR, "auth_config.yaml")
+CONFIG_FILE = os.path.abspath(os.path.join('config', 'config.yaml'))
+
+print(f"[DEBUG] CONFIG FILE PATH: {CONFIG_FILE}")
+print(f"[DEBUG] Current working directory: {os.getcwd()}")
+print(f"[DEBUG] Config exists: {os.path.exists(CONFIG_FILE)}")
+print(f"[DEBUG] Config writable: {os.access(CONFIG_FILE, os.W_OK)}")
 
 def initialize_auth():
     """Initialize authentication configuration if it doesn't exist"""
@@ -49,8 +54,16 @@ def get_authenticator():
     """Return an authenticator object from the configuration"""
     initialize_auth()
     
-    # Check if authenticator already exists in session state
-    if 'authenticator' not in st.session_state:
+    # Initialize session state for authentication if not exists
+    if 'auth_initialized' not in st.session_state:
+        st.session_state.auth_initialized = False
+        st.session_state.authenticator = None
+        st.session_state.config = None
+        st.session_state.authentication_status = None
+        st.session_state.name = None
+        st.session_state.username = None
+    
+    if not st.session_state.auth_initialized:
         # Load config
         with open(CONFIG_FILE, 'r') as file:
             config = yaml.load(file, Loader=SafeLoader)
@@ -60,21 +73,32 @@ def get_authenticator():
             config['preauthorized'] = {'emails': []}
         
         # Create authenticator with updated API
-        st.session_state.authenticator = stauth.Authenticate(
+        authenticator = stauth.Authenticate(
             credentials=config['credentials'],
             cookie_name=config['cookie']['name'],
             key=config['cookie']['key'],
             cookie_expiry_days=config['cookie']['expiry_days'],
             preauthorized=config['preauthorized']['emails']
         )
-        st.session_state.auth_config = config
+        
+        # Store in session state
+        st.session_state.authenticator = authenticator
+        st.session_state.config = config
+        st.session_state.auth_initialized = True
     
-    return st.session_state.authenticator, st.session_state.auth_config
+    return st.session_state.authenticator, st.session_state.config
 
 def save_config(config):
     """Save updated configuration back to file"""
     with open(CONFIG_FILE, 'w') as file:
         yaml.dump(config, file)
+    # Reset authentication state to force reload
+    st.session_state.auth_initialized = False
+    st.session_state.authenticator = None
+    st.session_state.config = None
+    st.session_state.authentication_status = None
+    st.session_state.name = None
+    st.session_state.username = None
 
 def display_user_management():
     """Display UI for managing users (admin only)"""
