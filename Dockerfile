@@ -36,8 +36,11 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application
-COPY . .
+# Copy only the necessary files
+COPY app/ app/
+COPY scripts/ scripts/
+COPY docs/ docs/
+COPY config/*.sample config/
 
 # Create necessary directories and set permissions
 RUN mkdir -p data logs config && \
@@ -45,10 +48,10 @@ RUN mkdir -p data logs config && \
     chmod -R 755 /app && \
     chmod 777 /app/data /app/logs /app/config
 
-# Ensure config.yaml exists and is writable
-RUN touch config/config.yaml && \
-    chown appuser:appuser config/config.yaml && \
-    chmod 666 config/config.yaml
+# Create empty config files that will be populated by environment variables
+RUN touch config/config.yaml config/gcs_config.yaml && \
+    chown appuser:appuser config/config.yaml config/gcs_config.yaml && \
+    chmod 666 config/config.yaml config/gcs_config.yaml
 
 # Make scripts executable
 RUN chmod +x scripts/backup-data.sh scripts/startup-restore.sh

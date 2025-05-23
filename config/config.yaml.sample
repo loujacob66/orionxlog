@@ -1,0 +1,14 @@
+cookie:
+  expiry_days: 30
+  key: your-cookie-key-here
+  name: orionx_podcast_trends_auth
+credentials:
+  usernames:
+    admin:
+      email: admin@example.com
+      is_admin: true
+      logged_in: false
+      name: Admin User
+      password: your-hashed-password-here
+preauthorized:
+  emails: [] 

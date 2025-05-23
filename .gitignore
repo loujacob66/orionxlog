@@ -46,8 +46,16 @@ Thumbs.db
 data/
 logs/
 temp/
+
+# Config files
 config/gcs_credentials.json
+config/*.key
+config/*.pem
+config/*.env
+config/secrets/
+config/config.yaml
+config/gcs_config.yaml
+config/*.bak
 
 .envrc
-config/
 

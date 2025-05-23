@@ -55,8 +55,12 @@ This project uses a robust, environment-aware backup and restore system for a St
 ## Authentication: Service Account JSON
 
 - **Locally:**
-  - Place your service account key at `config/gcs_credentials.json`.
-  - This is used for all GCS operations by setting `GOOGLE_APPLICATION_CREDENTIALS`.
+  1. Copy the sample credentials file:
+     ```bash
+     cp config/gcs_credentials.json.sample config/gcs_credentials.json
+     ```
+  2. Edit `config/gcs_credentials.json` with your Google Cloud service account credentials
+  3. This is used for all GCS operations by setting `GOOGLE_APPLICATION_CREDENTIALS`
 - **Cloud Run:**
   - The app uses the service account attached to the Cloud Run service.
   - No JSON file is needed in the container.
@@ -75,7 +79,11 @@ This project uses a robust, environment-aware backup and restore system for a St
 ## Local Development Checklist
 
 1. **Ensure you have Python 3.11 installed.**
-2. **Place your service account key at `config/gcs_credentials.json`.**
+2. **Set up credentials:**
+   ```bash
+   cp config/gcs_credentials.json.sample config/gcs_credentials.json
+   # Edit config/gcs_credentials.json with your credentials
+   ```
 3. **Set environment variables:**
    ```bash
    export GOOGLE_CLOUD_PROJECT=your-project-id

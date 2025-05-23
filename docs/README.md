@@ -46,9 +46,26 @@ pip install -r requirements.txt
 mkdir -p data logs config
 ```
 
-### 5. Configure Authentication
+### 5. Configure the Application
 
-Place your Google Cloud service account credentials in `config/gcs_credentials.json` for backup functionality.
+1. Set up authentication:
+   ```bash
+   cp config/gcs_credentials.json.sample config/gcs_credentials.json
+   cp config/config.yaml.sample config/config.yaml
+   cp config/gcs_config.yaml.sample config/gcs_config.yaml
+   ```
+
+2. Edit the configuration files:
+   - `config/gcs_credentials.json`: Add your Google Cloud service account credentials
+   - `config/config.yaml`: Configure authentication settings and user accounts
+   - `config/gcs_config.yaml`: Set your GCS bucket and project ID
+
+3. Set environment variables:
+   ```bash
+   export GOOGLE_CLOUD_PROJECT=your-project-id
+   export BACKUP_BUCKET_NAME=your-backup-bucket
+   export GOOGLE_APPLICATION_CREDENTIALS=config/gcs_credentials.json
+   ```
 
 ### 6. Run the App
 
@@ -67,6 +84,12 @@ orionxlog/
 │   ├── Home.py      # Main application entry point
 │   └── utils.py     # Utility functions
 ├── config/          # Configuration files
+│   ├── gcs_credentials.json.sample  # Template for GCS credentials
+│   ├── gcs_credentials.json        # Your actual credentials (gitignored)
+│   ├── config.yaml.sample          # Template for app configuration
+│   ├── config.yaml                 # Your app configuration (gitignored)
+│   ├── gcs_config.yaml.sample      # Template for GCS settings
+│   └── gcs_config.yaml            # Your GCS settings (gitignored)
 ├── data/            # SQLite database and data files
 ├── docs/            # Documentation
 ├── logs/            # Application and backup logs
@@ -106,7 +129,7 @@ For a complete list, see `requirements.txt`.
 
 ## 🧼 .gitignore Tips
 
-Add the following to avoid committing local junk:
+The following files and directories are ignored by git:
 
 ```
 .venv/
@@ -115,6 +138,13 @@ __pycache__/
 data/podcasts.db
 logs/
 config/gcs_credentials.json
+config/*.key
+config/*.pem
+config/*.env
+config/secrets/
+config/config.yaml
+config/gcs_config.yaml
+config/*.bak
 ```
 
 ---
@@ -126,6 +156,7 @@ config/gcs_credentials.json
 - `eq_full = full + 0.5 * partial`, floored to integer
 - Backups are stored in Google Cloud Storage
 - Authentication is required for sensitive operations
+- Configuration is managed through YAML files in the config directory
 
 For more details on deployment and backup/restore functionality, see:
 - `docs/DEPLOY_TO_CLOUD_RUN.md`
