@@ -11,7 +11,7 @@ This project uses a robust, environment-aware backup and restore system for a St
 +-------------------+         +-------------------+         +-------------------+
 |                   |         |                   |         |                   |
 |   Streamlit App   +-------->+  BackupManager    +-------->+  Bash Scripts     |
-|                   |         |  (Python)         |         |  (backup/restore) |
+|   (Home.py)       |         |  (Python)         |         |  (backup/restore) |
 +-------------------+         +-------------------+         +-------------------+
                                                                 |
                                                                 v
@@ -58,7 +58,17 @@ This project uses a robust, environment-aware backup and restore system for a St
   - Place your service account key at `config/gcs_credentials.json`.
   - This is used for all GCS operations by setting `GOOGLE_APPLICATION_CREDENTIALS`.
 - **Cloud Run:**
-  - The app uses the service account attached to the Cloud Run service. No JSON file is needed in the container.
+  - The app uses the service account attached to the Cloud Run service.
+  - No JSON file is needed in the container.
+  - Service account must have Storage Admin permissions.
+
+---
+
+## Required Environment Variables
+
+- `GOOGLE_CLOUD_PROJECT`: Your Google Cloud project ID
+- `BACKUP_BUCKET_NAME`: The name of your GCS bucket for backups
+- `GOOGLE_APPLICATION_CREDENTIALS`: Path to service account JSON (local only)
 
 ---
 
@@ -66,11 +76,17 @@ This project uses a robust, environment-aware backup and restore system for a St
 
 1. **Ensure you have Python 3.11 installed.**
 2. **Place your service account key at `config/gcs_credentials.json`.**
-3. **Run the app:**
+3. **Set environment variables:**
+   ```bash
+   export GOOGLE_CLOUD_PROJECT=your-project-id
+   export BACKUP_BUCKET_NAME=your-backup-bucket
+   export GOOGLE_APPLICATION_CREDENTIALS=config/gcs_credentials.json
+   ```
+4. **Run the app:**
    ```bash
    streamlit run app/Home.py
    ```
-4. **Backups/Restores:**
+5. **Backups/Restores:**
    - Trigger from the Admin UI, or run scripts directly.
    - All GCS operations will use your service account key.
 
@@ -80,8 +96,11 @@ This project uses a robust, environment-aware backup and restore system for a St
 
 1. **Build and deploy your Docker image as described in `DEPLOY_TO_CLOUD_RUN.md`.**
 2. **Attach a service account with GCS permissions to your Cloud Run service.**
-3. **No need to include the JSON key in your Docker image.**
-4. **Backups/Restores:**
+3. **Set environment variables in Cloud Run:**
+   - `GOOGLE_CLOUD_PROJECT`
+   - `BACKUP_BUCKET_NAME`
+4. **No need to include the JSON key in your Docker image.**
+5. **Backups/Restores:**
    - Work the same way as locally, but use the Cloud Run service account for authentication.
 
 ---
@@ -91,10 +110,15 @@ This project uses a robust, environment-aware backup and restore system for a St
 - **Password prompt or auth errors?**
   - Make sure `GOOGLE_APPLICATION_CREDENTIALS` is set and points to a valid service account key (locally).
   - Make sure the service account has the right GCS permissions.
+  - Check that the service account has Storage Admin role.
 - **Python version error with gsutil?**
   - Always set `CLOUDSDK_PYTHON=python3.11` for gsutil commands.
 - **No objects found in GCS?**
   - Run a backup first; the folder will be empty until you do.
+- **Permission denied errors?**
+  - Verify service account permissions in Google Cloud Console.
+  - Check that the bucket exists and is accessible.
+  - Ensure the service account has Storage Admin role.
 
 ---
 
@@ -104,7 +128,16 @@ This project uses a robust, environment-aware backup and restore system for a St
   - **No.** Only for local development/testing. Cloud Run uses its attached service account.
 - **Can I use the Python GCS client?**
   - Yes, but all backup/restore operations here use `gsutil` for simplicity and reliability.
+- **How often should I run backups?**
+  - Daily backups are recommended for production environments.
+  - Manual backups are sufficient for development.
+- **Where are backup logs stored?**
+  - Backup logs are stored in the `logs/` directory.
+  - They are also visible in the Streamlit Admin UI.
 
 ---
 
-For more details, see the code comments and `DEPLOY_TO_CLOUD_RUN.md`. 
+For more details, see:
+- `app/backup_manager.py` for the Python implementation
+- `scripts/backup-data.sh` and `scripts/startup-restore.sh` for the shell scripts
+- `DEPLOY_TO_CLOUD_RUN.md` for deployment instructions 

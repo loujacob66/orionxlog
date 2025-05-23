@@ -48,6 +48,7 @@ You can switch between these modes at any time. For development, we recommend us
 - [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) installed
 - Docker installed and running
 - Permissions to use Cloud Run and Container Registry in your Google Cloud project
+- Python 3.11 or later
 
 ---
 
@@ -82,6 +83,7 @@ If you need to deploy manually or customize the deployment, follow these steps:
 In the [Google Cloud Console](https://console.cloud.google.com/):
 - Enable **Cloud Run Admin API**
 - Enable **Container Registry API**
+- Enable **Cloud Storage API** (for backups)
 
 ### 2. Authenticate with Google Cloud
 
@@ -120,8 +122,21 @@ gcloud run deploy orionx-podcast-analysis \
   --image gcr.io/YOUR_PROJECT_ID/orionx-podcast-analysis \
   --platform managed \
   --region us-west2 \
-  --allow-unauthenticated
+  --allow-unauthenticated \
+  --service-account YOUR_SERVICE_ACCOUNT@YOUR_PROJECT_ID.iam.gserviceaccount.com
 ```
+
+> **Note:** Make sure your service account has the necessary permissions for Cloud Storage (for backups) and Cloud Run.
+
+---
+
+## Environment Variables
+
+The following environment variables are required in Cloud Run:
+
+- `GOOGLE_CLOUD_PROJECT`: Your Google Cloud project ID
+- `BACKUP_BUCKET_NAME`: The name of your GCS bucket for backups
+- `AUTH_USERS`: JSON string containing authorized users (see authentication.py)
 
 ---
 
@@ -129,14 +144,19 @@ gcloud run deploy orionx-podcast-analysis \
 
 - **Image not found:** Make sure the image push step completed successfully and you used the correct project ID.
 - **Architecture errors:** Always use the `--platform linux/amd64` flag when building on Apple Silicon.
-- **Permissions errors:** Ensure your Google account has the necessary IAM roles (e.g., Storage Admin, Cloud Run Admin).
+- **Permissions errors:** Ensure your service account has the necessary IAM roles:
+  - Storage Admin (for backups)
+  - Cloud Run Admin
+  - Service Account User
 - **Script errors:** If the deployment script fails, check the error message and ensure you have all prerequisites installed and are properly authenticated.
+- **Authentication errors:** Verify that your service account has the correct permissions and that the AUTH_USERS environment variable is properly set.
 
 ---
 
 ## References
 - [Cloud Run Quickstart](https://cloud.google.com/run/docs/quickstarts/build-and-deploy)
-- [Container Registry Quickstart](https://cloud.google.com/container-registry/docs/quickstart) 
+- [Container Registry Quickstart](https://cloud.google.com/container-registry/docs/quickstart)
+- [Cloud Storage IAM](https://cloud.google.com/storage/docs/access-control/iam)
 
 FROM python:3.11-slim
 
