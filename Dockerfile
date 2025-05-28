@@ -40,18 +40,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ app/
 COPY scripts/ scripts/
 COPY docs/ docs/
-COPY config/*.sample config/
+COPY config/ config/
+COPY data/ data/
 
 # Create necessary directories and set permissions
-RUN mkdir -p data logs config && \
+RUN mkdir -p data logs && \
     chown -R appuser:appuser /app && \
     chmod -R 755 /app && \
     chmod 777 /app/data /app/logs /app/config
-
-# Create empty config files that will be populated by environment variables
-RUN touch config/config.yaml config/gcs_config.yaml && \
-    chown appuser:appuser config/config.yaml config/gcs_config.yaml && \
-    chmod 666 config/config.yaml config/gcs_config.yaml
 
 # Make scripts executable
 RUN chmod +x scripts/backup-data.sh scripts/startup-restore.sh

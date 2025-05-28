@@ -102,9 +102,12 @@ def extract_code_feature_title(filename_url_part: str) -> Tuple[Optional[str], O
                         except ValueError:
                             continue
     # Pattern 1: DDD@FEATURE_OptionalSeparator_TITLE
-    if match := re.match(r'^(\d{3})@(HPCpodcast|HPCNB|Mktg_Podcast)', processed_filename):
+    if match := re.match(r'^(\d{3})@(HPCpodcast|HPCNB|Mktg_Podcast|HPCpodcas)', processed_filename):
         code_val = match.group(1)
         feature_val = match.group(2)
+        # Map HPCpodcas to HPCpodcast
+        if feature_val == "HPCpodcas":
+            feature_val = "HPCpodcast"
         title_val = processed_filename[match.end():]
         if title_val.startswith('_'):
             title_val = title_val[1:]
@@ -124,8 +127,11 @@ def extract_code_feature_title(filename_url_part: str) -> Tuple[Optional[str], O
         print(f"Pattern 3 match - Code: {code_part}, Feature: {feature_part}, Title: {title_part}")
         return code_part, feature_part, title_part, created_at
     # Pattern 4: FEATURE_TITLE or FEATURE_CODE_TITLE
-    if match_main_feature := re.match(r'^(HPCpodcast|HPCNB|Mktg_Podcast|OXD)_', processed_filename):
+    if match_main_feature := re.match(r'^(HPCpodcast|HPCNB|Mktg_Podcast|OXD|HPCpodcas)_', processed_filename):
         feature_val = match_main_feature.group(1)
+        # Map HPCpodcas to HPCpodcast
+        if feature_val == "HPCpodcas":
+            feature_val = "HPCpodcast"
         temp_title = processed_filename[match_main_feature.end():]
         if match_code_and_title := re.match(r'^(\d{3})_(.*)', temp_title):
             code_val = match_code_and_title.group(1)
@@ -153,16 +159,21 @@ def extract_created_at_from_url(url):
     return None
 
 def parse_excel_filename_date(filename_only):
+    print(f"[DEBUG] parse_excel_filename_date called with: {filename_only}")
     match = re.match(r"(\d{4})(\d{2})(\d{2})_.*\.xlsx?", filename_only, re.IGNORECASE)
     if match:
         year, month, day_val = int(match.group(1)), int(match.group(2)), int(match.group(3))
-        # day_val from filename is ignored for setting the date, we use last day of month
+        # If day_val is 0, treat as first day of month
+        if day_val == 0:
+            day_val = 1
         try:
-            _, last_day_of_month = calendar.monthrange(year, month)
-            return date(year, month, last_day_of_month), year, month
+            dt = date(year, month, day_val)
+            print(f"[DEBUG] Parsed date: {dt}, year: {year}, month: {month}")
+            return dt, year, month
         except ValueError:
-            print(f"Warning: Could not parse date from filename {filename_only} with parts {year}-{month}-(last_day)")
+            print(f"Warning: Could not parse date from filename {filename_only} with parts {year}-{month}-{day_val}")
             return None, None, None
+    print(f"[DEBUG] No match for date in filename: {filename_only}")
     return None, None, None
 
 def format_bw(value_mb):
@@ -174,7 +185,7 @@ def format_bw(value_mb):
 
 def print_aggregation_summary_for_sheet(sheet_name, aggregated_data, consumed_year, consumed_month_display, file_type):
     aggregation_found = False
-    for data_item in aggregated_data.values(): # Iterate directly over values
+    for data_item in aggregated_data.values():
         if data_item["num_records_aggregated"] > 1:
             aggregation_found = True
             break
@@ -182,58 +193,45 @@ def print_aggregation_summary_for_sheet(sheet_name, aggregated_data, consumed_ye
     if not aggregation_found:
         return
 
-    print(f"\n--- Intra-File Duplicate Aggregation Summary Table for Sheet: '{sheet_name}' ({file_type} data) ---")
-    # Define headers for the new single table
-    headers = [
-        "No.", "URL (Last 45 Chars)", "Period", "Orig.", "Title (First)",
-        "Sum Full", "Sum Part", "Sum Total BW", "Calc Eq.Full", "Calc Avg.BW"
-    ]
-    # Define column widths (approximate, adjust as needed)
-    col_widths = [3, 45, 10, 5, 60, 8, 8, 14, 12, 12] # Increased Title column width to 60
-
-    header_line = " | ".join([h.ljust(w) for h, w in zip(headers, col_widths)])
-    print(header_line)
-    print("-" * len(header_line))
+    print(f"\nAggregation Summary for '{sheet_name}' ({file_type} data):")
+    print("-" * 80)
 
     count = 0
+    total_aggregated = 0
+    total_full = 0
+    total_partial = 0
+    total_bw = 0
+
     for key, data_item in aggregated_data.items():
         if data_item["num_records_aggregated"] > 1:
             count += 1
-            url_display = data_item['url']
-            if len(url_display) > col_widths[1]: # URL column width
-                url_display = "..." + url_display[-(col_widths[1]-3):]
+            total_aggregated += data_item["num_records_aggregated"]
+            total_full += data_item["full_sum"]
+            total_partial += data_item["partial_sum"]
+            total_bw += data_item["total_bw_sum"]
             
-            consumed_period_str = f"{consumed_year}-{consumed_month_display:02d}" if consumed_month_display else str(consumed_year)
-            num_original_rows = str(data_item['num_records_aggregated'])
-            title_display = data_item['title']
+            # Print a concise summary for each aggregated item
+            print(f"\n{count}. {data_item['title']}")
+            print(f"   - Period: {consumed_year}-{consumed_month_display:02d}" if consumed_month_display else f"   - Year: {consumed_year}")
+            print(f"   - Aggregated {data_item['num_records_aggregated']} records")
+            print(f"   - Total: {int(data_item['full_sum'])} full + {int(data_item['partial_sum'])} partial downloads")
+            print(f"   - Bandwidth: {format_bw(data_item['total_bw_sum'])}")
             
-            eq_full_display = (math.floor(data_item["full_sum"] + 0.5 * data_item["partial_sum"]) 
-                             if pd.notnull(data_item["full_sum"]) and pd.notnull(data_item["partial_sum"]) else None)
+            eq_full = math.floor(data_item["full_sum"] + 0.5 * data_item["partial_sum"]) if pd.notnull(data_item["full_sum"]) and pd.notnull(data_item["partial_sum"]) else None
+            if eq_full is not None:
+                print(f"   - Equivalent full downloads: {int(eq_full)}")
             
-            avg_bw_display = None
             if (data_item["full_sum"] + data_item["partial_sum"]) > 0:
-                avg_bw_display = data_item["total_bw_sum"] / (data_item["full_sum"] + data_item["partial_sum"])
-
-            row_values = [
-                str(count),
-                url_display,
-                consumed_period_str,
-                num_original_rows,
-                title_display,
-                str(int(data_item['full_sum'])),
-                str(int(data_item['partial_sum'])),
-                format_bw(data_item['total_bw_sum']),
-                str(int(eq_full_display)) if eq_full_display is not None else 'N/A',
-                format_bw(avg_bw_display)
-            ]
-            
-            # Ensure all row_values are strings before ljust
-            row_values_str = [str(v) for v in row_values]
-            row_line = " | ".join([val.ljust(w) for val, w in zip(row_values_str, col_widths)])
-            print(row_line)
-            
+                avg_bw = data_item["total_bw_sum"] / (data_item["full_sum"] + data_item["partial_sum"])
+                print(f"   - Average bandwidth per download: {format_bw(avg_bw)}")
+    
     if aggregation_found:
-      print("--- End of Aggregation Summary Table ---")
+        print("\nSummary:")
+        print(f"- Total aggregated items: {count}")
+        print(f"- Total records merged: {total_aggregated}")
+        print(f"- Total downloads: {int(total_full)} full + {int(total_partial)} partial")
+        print(f"- Total bandwidth: {format_bw(total_bw)}")
+        print("-" * 80)
 
 def parse_float(val):
     if isinstance(val, str):
@@ -433,24 +431,44 @@ def backup_database(db_path: str) -> str:
     print(f"Created database backup: {backup_path}")
     return backup_path
 
-def import_data(filepath: str, override: bool = False, dry_run: bool = False, reset_db: bool = False, skip_backup: bool = False) -> dict:
-    """
-    Import podcast data from Excel files into SQLite database.
-    
-    Args:
-        filepath: Path to the Excel file
-        override: Whether to override existing database
-        dry_run: Whether to perform a dry run (no actual database changes)
-        reset_db: Whether to reset the database before import
-        skip_backup: Whether to skip creating a backup (used when backup is created externally)
-    """
+def import_data(filepath: str, override: bool = False, dry_run: bool = False, reset_db: bool = False, skip_backup: bool = False, original_filename: str = None) -> dict:
+    print(f"[DEBUG] import_data called for: {filepath}")
     db_path = "data/podcasts.db"
-    filename_only = os.path.basename(filepath)
+    if original_filename is not None:
+        filename_only = os.path.basename(original_filename)
+    else:
+        filename_only = os.path.basename(filepath)
     file_type = detect_file_type(filename_only)
+    print(f"[DEBUG] Detected file type for '{filename_only}': {file_type}")
+
+    # Initialize statistics early with filename and file_type
+    stats = {
+        'filename': filename_only, # Ensure filename is in stats for Admin.py
+        'file_type': file_type if file_type else 'Unknown', # Ensure file_type is in stats
+        'dry_run': {'inserted': 0, 'replaced': 0, 'ignored': 0},
+        'actual': {'inserted': 0, 'replaced': 0, 'ignored': 0},
+        'sheets': {
+            'total': 0, # Will be updated after checking readable sheets
+            'processed': 0,
+            'skipped': {'unreadable': 0, 'missing_cols': 0, 'bad_date': 0}
+        },
+        'rows': {
+            'scanned': 0,
+            'merged': 0,
+            'errors': 0
+        },
+        'unprocessed_sheet_info': [] # For detailed reporting of skipped/failed sheets
+    }
 
     if not file_type:
         print(f"Error: Could not automatically determine file type for '{filename_only}'.")
-        return
+        # Populate stats for return even on early exit
+        stats['sheets']['skipped']['unreadable'] = 1 # Assuming 1 sheet if file type unknown
+        stats['unprocessed_sheet_info'].append({
+            'sheet_name': 'N/A (file type undetermined)',
+            'reason': 'Could not automatically determine file type.'
+        })
+        return stats
 
     if reset_db and os.path.exists(db_path) and not dry_run:
         print(f"🗑️ Removing existing database {db_path} due to --reset-db flag.")
@@ -491,29 +509,13 @@ def import_data(filepath: str, override: bool = False, dry_run: bool = False, re
         print(f"Error reading file {filepath}: {e}")
         traceback.print_exc()
         conn.close()
-        return
-
-    # Initialize statistics
-    stats = {
-        'dry_run': {'inserted': 0, 'replaced': 0, 'ignored': 0},
-        'actual': {'inserted': 0, 'replaced': 0, 'ignored': 0},
-        'sheets': {
-            'total': len(all_sheet_names),
-            'processed': 0,
-            'skipped': {'unreadable': 0, 'missing_cols': 0, 'bad_date': 0}
-        },
-        'rows': {
-            'scanned': 0,
-            'merged': 0,
-            'errors': 0
-        }
-    }
-
-    # Create backup if database exists and this is not a dry run
-    if not dry_run and os.path.exists(db_path) and not skip_backup:
-        backup_path = backup_database(db_path)
-        if backup_path:
-            print(f"Database backed up to: {backup_path}")
+        # Populate stats for return even on file read error
+        stats['sheets']['skipped']['unreadable'] = len(all_sheet_names) if 'all_sheet_names' in locals() else 1
+        stats['unprocessed_sheet_info'].append({
+            'sheet_name': 'N/A (file read error)',
+            'reason': f'Error reading Excel file: {str(e)}'
+        })
+        return stats
 
     # Determine which sheets to process
     sheets_to_process = all_sheet_names if file_type == "report" else [all_sheet_names[0]] if all_sheet_names else []
@@ -527,8 +529,14 @@ def import_data(filepath: str, override: bool = False, dry_run: bool = False, re
             print(f"{'='*50}")
             
             df = read_excel_with_hyperlinks(filepath, sheet_name)
+            print(f"[DEBUG] Columns found in sheet '{sheet_name}': {list(df.columns)}")
             if df.empty:
                 print(f"No data found in sheet '{sheet_name}'")
+                stats['sheets']['skipped']['missing_cols'] += 1 # Or a new category like 'empty'
+                stats['unprocessed_sheet_info'].append({
+                    'sheet_name': sheet_name,
+                    'reason': 'No data found in sheet'
+                })
                 continue
 
             # Map columns according to file type
@@ -537,9 +545,15 @@ def import_data(filepath: str, override: bool = False, dry_run: bool = False, re
             renamed_cols = {v: k for k, v in col_map.items() if v in df.columns}
             df.rename(columns=renamed_cols, inplace=True)
 
+            print(f"[DEBUG] Columns after renaming in sheet '{sheet_name}': {list(df.columns)}")
+
             if not EXPECTED_MAPPED_COLS.issubset(df.columns):
-                print(f"Warning: Sheet '{sheet_name}' missing required columns. Expected: {EXPECTED_MAPPED_COLS}. Got: {set(df.columns)}")
+                print(f"[DEBUG] WARNING: Sheet '{sheet_name}' missing required columns. Expected: {EXPECTED_MAPPED_COLS}. Got: {set(df.columns)}")
                 stats['sheets']['skipped']['missing_cols'] += 1
+                stats['unprocessed_sheet_info'].append({
+                    'sheet_name': sheet_name,
+                    'reason': f"Missing required columns. Expected: {EXPECTED_MAPPED_COLS}, Got: {set(df.columns)}"
+                })
                 continue
 
             # Determine consumption date
@@ -553,12 +567,20 @@ def import_data(filepath: str, override: bool = False, dry_run: bool = False, re
                 except ValueError:
                     print(f"Warning: Invalid year in sheet name '{sheet_name}'")
                     stats['sheets']['skipped']['bad_date'] += 1
+                    stats['unprocessed_sheet_info'].append({
+                        'sheet_name': sheet_name,
+                        'reason': f"Invalid year in sheet name '{sheet_name}'"
+                    })
                     continue
             else:  # monthly
                 parsed_date, yr, mn = parse_excel_filename_date(filename_only)
                 if not parsed_date:
                     print(f"Warning: Could not parse date from filename {filename_only}")
                     stats['sheets']['skipped']['bad_date'] += 1
+                    stats['unprocessed_sheet_info'].append({
+                        'sheet_name': sheet_name, # For monthly, usually the first sheet
+                        'reason': f"Could not parse date from filename '{filename_only}' for this sheet"
+                    })
                     continue
                 consumed_year, consumed_month = yr, mn
                 consumed_at = parsed_date.isoformat()
@@ -677,7 +699,7 @@ def import_data(filepath: str, override: bool = False, dry_run: bool = False, re
                         consumed_month,
                         assumed_month,
                         imported_at,
-                        filepath
+                        filename_only
                     )
 
                     if dry_run:
@@ -736,6 +758,10 @@ def import_data(filepath: str, override: bool = False, dry_run: bool = False, re
             print(f"Error processing sheet '{sheet_name}': {e}")
             traceback.print_exc()
             stats['sheets']['skipped']['unreadable'] += 1
+            stats['unprocessed_sheet_info'].append({
+                'sheet_name': sheet_name,
+                'reason': f'Error processing sheet: {str(e)}'
+            })
             continue
 
     conn.commit()

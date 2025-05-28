@@ -15,6 +15,7 @@ import sqlite3
 import os
 import sys
 import time
+import subprocess
 # Add project root to sys.path for robust imports
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if _project_root not in sys.path:
@@ -35,23 +36,51 @@ if not st.session_state.startup_complete:
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Check restore status
-    status_file = "/tmp/restore_status.txt"
-    if os.path.exists(status_file):
-        with open(status_file, 'r') as f:
-            restore_status = f.read().strip()
-            status_text.text(restore_status)
-            if "Error" in restore_status:
-                st.error(restore_status)
-                st.stop()
-            elif "completed successfully" in restore_status:
-                progress_bar.progress(40)
-            elif "Extracting" in restore_status:
-                progress_bar.progress(30)
-            elif "Downloading" in restore_status:
-                progress_bar.progress(20)
-            elif "Found backup" in restore_status:
-                progress_bar.progress(10)
+    # Run startup-restore script if running locally
+    if not os.path.exists("/app/data"):  # Check if we're running locally
+        status_text.text("Running database restore...")
+        progress_bar.progress(10)
+        try:
+            # Create a copy of the current environment
+            env = os.environ.copy()
+            # Ensure Python version is set for gsutil
+            env["CLOUDSDK_PYTHON"] = "python3.11"
+            
+            # Run the restore script
+            result = subprocess.run(
+                ["bash", "scripts/startup-restore.sh"],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env
+            )
+            
+            # Check restore status immediately after script completes
+            status_file = "/tmp/restore_status.txt"
+            if os.path.exists(status_file):
+                with open(status_file, 'r') as f:
+                    restore_status = f.read().strip()
+                    # Display backup information in a more prominent way
+                    if "Restoring from backup" in restore_status:
+                        st.success(restore_status)
+                    elif "No backup found" in restore_status:
+                        st.warning(restore_status)
+                    else:
+                        status_text.text(restore_status)
+                    
+                    # Add a continue button
+                    if st.button("Continue", key="startup_continue"):
+                        progress_bar.progress(40)
+                    else:
+                        st.stop()
+            
+            progress_bar.progress(40)
+        except subprocess.CalledProcessError as e:
+            st.error(f"Error during restore: {e.stderr}")
+            st.stop()
+        except Exception as e:
+            st.error(f"Unexpected error during restore: {str(e)}")
+            st.stop()
     
     # Initialize backup manager
     status_text.text("Initializing backup system...")

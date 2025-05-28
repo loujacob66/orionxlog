@@ -9,10 +9,9 @@ import base64
 CONFIG_DIR = "config"
 CONFIG_FILE = os.path.abspath(os.path.join('config', 'config.yaml'))
 
-print(f"[DEBUG] CONFIG FILE PATH: {CONFIG_FILE}")
-print(f"[DEBUG] Current working directory: {os.getcwd()}")
-print(f"[DEBUG] Config exists: {os.path.exists(CONFIG_FILE)}")
-print(f"[DEBUG] Config writable: {os.access(CONFIG_FILE, os.W_OK)}")
+print(f"[DEBUG] AUTH: CONFIG_FILE path: {CONFIG_FILE}")
+print(f"[DEBUG] AUTH: Current working directory: {os.getcwd()}")
+print(f"[DEBUG] AUTH: Config exists: {os.path.exists(CONFIG_FILE)}")
 
 def initialize_auth():
     """Initialize authentication configuration if it doesn't exist"""
@@ -20,85 +19,104 @@ def initialize_auth():
         os.makedirs(CONFIG_DIR)
     
     if not os.path.exists(CONFIG_FILE):
-        # Create a default configuration with one admin user
         default_config = {
             'credentials': {
                 'usernames': {
                     'admin': {
                         'name': 'Admin User',
                         'email': 'admin@example.com',
-                        'password': stauth.Hasher(['password']).generate()[0],  # Default password: 'password'
+                        'password': stauth.Hasher(['password']).generate()[0],
                         'is_admin': True
                     }
                 }
             },
             'cookie': {
                 'expiry_days': 30,
-                'key': base64.b64encode(os.urandom(16)).decode(),  # Generate a random key
+                'key': base64.b64encode(os.urandom(16)).decode(),
                 'name': 'orionx_podcast_trends_auth'
             },
-            'preauthorized': {
-                'emails': []
-            }
+            'preauthorized': {'emails': []}
         }
-        
         with open(CONFIG_FILE, 'w') as file:
             yaml.dump(default_config, file)
-        
-        print(f"Created default authentication configuration at {CONFIG_FILE}")
-        print("Default username: admin")
-        print("Default password: password")
-        print("IMPORTANT: Change the default credentials immediately after first login!")
+        print(f"[DEBUG] AUTH: Created default config at {CONFIG_FILE}")
+        print("IMPORTANT: Default admin/password created. Change immediately!")
 
 def get_authenticator():
-    """Return an authenticator object from the configuration"""
+    """Return an authenticator object, aggressively re-initializing if necessary."""
     initialize_auth()
-    
-    # Initialize session state for authentication if not exists
-    if 'auth_initialized' not in st.session_state:
-        st.session_state.auth_initialized = False
-        st.session_state.authenticator = None
-        st.session_state.config = None
-        st.session_state.authentication_status = None
-        st.session_state.name = None
-        st.session_state.username = None
-    
-    if not st.session_state.auth_initialized:
-        # Load config
-        with open(CONFIG_FILE, 'r') as file:
-            config = yaml.load(file, Loader=SafeLoader)
+
+    # Determine if a full re-initialization is needed
+    if not st.session_state.get('auth_initialized', False) or \
+       st.session_state.get('authenticator') is None:
         
-        # Make sure config has the preauthorized key
-        if 'preauthorized' not in config:
-            config['preauthorized'] = {'emails': []}
+        print("[DEBUG] AUTH: Forcing full reset and re-creation of authenticator.")
         
-        # Create authenticator with updated API
-        authenticator = stauth.Authenticate(
-            credentials=config['credentials'],
-            cookie_name=config['cookie']['name'],
-            key=config['cookie']['key'],
-            cookie_expiry_days=config['cookie']['expiry_days'],
-            preauthorized=config['preauthorized']['emails']
-        )
+        # Explicitly delete all known auth-related keys from session state
+        keys_to_delete = ['authenticator', 'config', 'authentication_status', 'name', 'username', 'auth_initialized']
+        for key in keys_to_delete:
+            if key in st.session_state:
+                del st.session_state[key]
         
-        # Store in session state
-        st.session_state.authenticator = authenticator
-        st.session_state.config = config
-        st.session_state.auth_initialized = True
-    
+        print(f"[DEBUG] AUTH: Loading config from {CONFIG_FILE} for re-initialization.")
+        try:
+            with open(CONFIG_FILE, 'r') as file:
+                config_data = yaml.load(file, Loader=SafeLoader)
+            if not config_data or 'credentials' not in config_data or 'cookie' not in config_data:
+                print("[DEBUG] AUTH: Config file is invalid or missing crucial keys during re-init.")
+                st.error("Authentication configuration is invalid. Please check config.yaml.")
+                st.stop()
+            print(f"[DEBUG] AUTH: Config loaded for re-init. Users: {list(config_data.get('credentials', {}).get('usernames', {}).keys())}")
+        except Exception as e:
+            print(f"[DEBUG] AUTH: Critical error loading config during re-init: {e}")
+            st.error(f"Fatal error: Could not load authentication configuration: {e}")
+            st.stop()
+
+        if 'preauthorized' not in config_data:
+            config_data['preauthorized'] = {'emails': []}
+
+        try:
+            auth_obj = stauth.Authenticate(
+                credentials=config_data['credentials'],
+                cookie_name=config_data['cookie']['name'],
+                key=config_data['cookie']['key'],
+                cookie_expiry_days=config_data['cookie']['expiry_days'],
+                preauthorized=config_data['preauthorized']['emails']
+            )
+            print("[DEBUG] AUTH: Authenticator object re-created successfully.")
+        except Exception as e:
+            print(f"[DEBUG] AUTH: Critical error re-creating authenticator: {e}")
+            st.error(f"Fatal error: Could not initialize authenticator: {e}")
+            st.stop()
+
+        st.session_state.authenticator = auth_obj
+        st.session_state.config = config_data
+        st.session_state.auth_initialized = True # Mark as initialized *after* successful creation
+        print("[DEBUG] AUTH: Authentication fully re-initialized and stored in session state.")
+    else:
+        print("[DEBUG] AUTH: Using existing authenticator from session state.")
+            
     return st.session_state.authenticator, st.session_state.config
 
-def save_config(config):
-    """Save updated configuration back to file"""
-    with open(CONFIG_FILE, 'w') as file:
-        yaml.dump(config, file)
-    # Reset authentication state to force reload
-    st.session_state.auth_initialized = False
-    st.session_state.authenticator = None
-    st.session_state.config = None
-    st.session_state.authentication_status = None
-    st.session_state.name = None
-    st.session_state.username = None
+def save_config(config_to_save):
+    """Save updated configuration and force a full auth reset for the next load."""
+    try:
+        with open(CONFIG_FILE, 'w') as file:
+            yaml.dump(config_to_save, file)
+        print(f"[DEBUG] AUTH: Config saved to {CONFIG_FILE}.")
+    except Exception as e:
+        print(f"[DEBUG] AUTH: Error saving config: {e}")
+        st.error(f"Error saving configuration: {e}")
+        return
+
+    print("[DEBUG] AUTH: Config saved. Forcing full auth reset for next interaction.")
+    # Explicitly delete all known auth-related keys to force re-creation by get_authenticator
+    keys_to_delete = ['authenticator', 'config', 'authentication_status', 'name', 'username', 'auth_initialized']
+    for key in keys_to_delete:
+        if key in st.session_state:
+            del st.session_state[key]
+    # Setting auth_initialized to False here is also an option, but deleting ensures it.
+    # st.session_state.auth_initialized = False
 
 def display_user_management():
     """Display UI for managing users (admin only)"""
