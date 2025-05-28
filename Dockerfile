@@ -44,13 +44,10 @@ COPY config/ config/
 COPY data/ data/
 
 # Create necessary directories and set permissions
-RUN mkdir -p data logs && \
+RUN mkdir -p data logs config && \
     chown -R appuser:appuser /app && \
-    chmod -R 755 /app && \
-    chmod 777 /app/data /app/logs /app/config
-
-# Make scripts executable
-RUN chmod +x scripts/backup-data.sh scripts/startup-restore.sh
+    chmod -R u+rwx,go+rx /app && \
+    find /app/scripts -name '*.sh' -exec chmod u+x {} +
 
 # Expose the port Streamlit runs on
 EXPOSE 8080
@@ -63,4 +60,4 @@ ENV HOME=/home/appuser
 USER appuser
 
 # Command to run the application
-CMD ["/bin/bash", "-c", "scripts/startup-restore.sh && streamlit run app/Home.py --server.port=8080 --server.address=0.0.0.0"] 
+CMD ["/bin/bash", "-c", "gcloud auth activate-service-account storage-admin-sa@orionx-podcast-analysis.iam.gserviceaccount.com --key-file=/app/config/gcs_credentials.json --project=orionx-podcast-analysis && scripts/startup-restore.sh && streamlit run app/Home.py --server.port=8080 --server.address=0.0.0.0"] 

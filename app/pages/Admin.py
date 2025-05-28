@@ -24,6 +24,7 @@ import tempfile
 import hashlib
 import contextlib
 import streamlit_authenticator as stauth
+import sqlite3 # Added for get_db_row_count
 
 # Define directory paths
 if os.path.exists("/app/data"):
@@ -42,6 +43,21 @@ os.makedirs(permanent_upload_dir, exist_ok=True)
 # GCS bucket configuration
 BUCKET_NAME = "orionxlog-uploaded-files"
 BUCKET_URL = f"gs://{BUCKET_NAME}"
+
+def get_db_row_count(db_path, table_name="podcasts"):
+    """Get the row count of a specific table in a SQLite database."""
+    if not os.path.exists(db_path):
+        return None # Or 0 or specific error indicator
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM {table_name};")
+        count = cur.fetchone()[0]
+        conn.close()
+        return count
+    except sqlite3.Error as e:
+        # st.warning(f"SQLite error reading {db_path} for row count: {e}") # Optional: log this
+        return None # Indicate error or inability to read
 
 def list_bucket_files():
     """List all files in the GCS bucket with their metadata, optimized."""
@@ -294,33 +310,51 @@ def list_gcs_backups():
                 size = int(parts[0])
                 gcs_url = parts[2]
                 filename = os.path.basename(gcs_url)
-                # Parse date/time from filename
-                # Example: backup_2025-05-22_16-09-32_UTC_local.tar.gz
-                m = re.match(r"backup_(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})_UTC_([^.]+)\.tar\.gz", filename)
+                db_rows_from_filename = "N/A" # Default for parsing
+
+                # Parse date/time and now row count from filename
+                # Example new: backup_2025-05-22_16-09-32_UTC_local_rows-123.tar.gz
+                # Example old: backup_2025-05-22_16-09-32_UTC_local.tar.gz
+                m = re.match(r"backup_(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})_UTC_([^._]+)(?:_rows-(\d+))?\.tar\.gz", filename)
+                
+                utc_dt = None
+                display_date = filename # Default if parsing fails
+                environment = "unknown"
+
                 if m:
-                    date_str, time_str, environment = m.groups()
+                    date_str, time_str, env_str, rows_str = m.groups()
                     # Parse UTC timestamp
                     utc_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H-%M-%S")
                     utc_dt = utc_dt.replace(tzinfo=timezone.utc)
                     # Convert to local timezone for display
                     local_dt = utc_dt.astimezone()
                     display_date = local_dt.strftime("%b %d, %Y %H:%M:%S %Z")
-                    # Validate environment
+                    environment = env_str if env_str else "unknown"
                     if environment not in ['cloud', 'local']:
-                        environment = 'unknown'
+                        environment = 'unknown' # Validate environment
+                    
+                    if rows_str:
+                        db_rows_from_filename = rows_str
+                    else:
+                        db_rows_from_filename = "N/A" # For old backups without row count in filename
                 else:
-                    utc_dt = None
-                    display_date = filename
-                    environment = "unknown"
+                    # Fallback for very old filenames or completely different patterns if any
+                    # This part might need adjustment if other filename patterns exist
+                    # For now, we assume the primary patterns are caught by the regex above
+                    pass # display_date and environment remain as defaults
+
                 backup_info.append({
                     'url': gcs_url,
                     'filename': filename,
                     'datetime': utc_dt,
                     'display_date': display_date,
                     'environment': environment,
-                    'size': f"{size/1024/1024:.2f} MB" if size else "unknown"
+                    'size': f"{size/1024/1024:.2f} MB" if size else "unknown", # Keep size for now
+                    'db_rows': db_rows_from_filename
                 })
-            except Exception:
+            except Exception: # General parsing error for a line
+                # This catches errors in processing a single line from gsutil output
+                # st.warning(f"Skipping backup line due to parsing error: {line}") # Optional logging
                 continue
         
         # Sort backups by UTC datetime, most recent first
@@ -394,7 +428,7 @@ if 'backup_list' not in st.session_state:
 st.title("Admin Dashboard")
 
 # Create tabs for different admin functions
-tab1, tab2, tab3 = st.tabs(["User Management", "Data Upload", "Backup Management"])
+tab1, tab2, tab3 = st.tabs(["User Management", "File and Database Management", "Backup Management"])
 
 with tab1:
     st.header("User Management")
@@ -481,10 +515,6 @@ with tab1:
                 users[username]['is_admin'] = new_admin_status
                 # Always use absolute path for config/config.yaml
                 config_path = os.path.abspath(os.path.join('config', 'config.yaml'))
-                st.write(f"[DEBUG] CONFIG FILE PATH: {config_path}")
-                st.write(f"[DEBUG] Current working directory: {os.getcwd()}")
-                st.write(f"[DEBUG] Config exists: {os.path.exists(config_path)}")
-                st.write(f"[DEBUG] Config writable: {os.access(config_path, os.W_OK)}")
                 try:
                     # Save the config
                     with open(config_path, 'w') as file:
@@ -530,84 +560,88 @@ with tab1:
                 except Exception as e:
                     st.error(f"❌ Error saving configuration: {str(e)}")
                     st.stop()
-        else:
-            st.error("Please fill in all fields")
 
     # Add new user
     st.subheader("Add New User")
-    new_username = st.text_input("Username")
-    new_name = st.text_input("Name")
-    new_email = st.text_input("Email")
-    new_password = st.text_input("Password", type="password")
+    new_username = st.text_input("Username*")
+    new_name = st.text_input("Name*")
+    new_email = st.text_input("Email*")
+    new_password = st.text_input("Password*", type="password")
     is_admin = st.checkbox("Admin privileges")
     
     if st.button("Add User"):
-        if new_username and new_name and new_email and new_password:
-            if new_username in config['credentials']['usernames']:
-                st.error("Username already exists")
-            else:
-                config['credentials']['usernames'][new_username] = {
-                    'name': new_name,
-                    'email': new_email,
-                    'password': stauth.Hasher([new_password]).generate()[0],
-                    'is_admin': is_admin
-                }
-                # Always use absolute path for config/config.yaml
-                config_path = os.path.abspath(os.path.join('config', 'config.yaml'))
-                st.write(f"[DEBUG] CONFIG FILE PATH: {config_path}")
-                st.write(f"[DEBUG] Current working directory: {os.getcwd()}")
-                st.write(f"[DEBUG] Config exists: {os.path.exists(config_path)}")
-                st.write(f"[DEBUG] Config writable: {os.access(config_path, os.W_OK)}")
-                try:
-                    # Save the config
-                    with open(config_path, 'w') as file:
-                        yaml.dump(config, file)
-                    
-                    # Small delay to ensure file is written
-                    time.sleep(1)
-                    
-                    # Verify the config was saved
-                    if os.path.exists(config_path):
-                        with open(config_path, 'r') as file:
-                            saved_config = yaml.safe_load(file)
-                            if new_username in saved_config.get('credentials', {}).get('usernames', {}):
-                                st.success("✅ Configuration saved successfully")
-                                # Update the in-memory config so the new user appears immediately
-                                users[new_username] = {
-                                    'name': new_name,
-                                    'email': new_email,
-                                    'password': stauth.Hasher([new_password]).generate()[0],
-                                    'is_admin': is_admin
-                                }
-                            else:
-                                st.error("❌ Configuration was not saved correctly")
-                                st.stop()
-                    else:
-                        st.error("❌ Configuration file was not found after saving")
-                        st.stop()
-                    
-                    # Create a placeholder for the backup status
-                    backup_status = st.empty()
-                    
-                    # Trigger a backup after adding a user
-                    backup_status.info("🔄 Creating backup of updated configuration...")
-                    backup_success = backup_manager.run_backup()
-                    
-                    if backup_success:
-                        backup_status.success("✅ Backup completed successfully")
-                        st.session_state.backup_list = list_gcs_backups()
-                    else:
-                        backup_status.warning("⚠️ User was added but backup failed. Please create a manual backup from the Backup Management tab.")
-                        st.stop()
-                        
-                except Exception as e:
-                    st.error(f"❌ Error saving configuration: {str(e)}")
-                    st.stop()
+        error_messages = []
+        if not new_username:
+            error_messages.append("Username is required.")
+        if not new_name:
+            error_messages.append("Name is required.")
+        if not new_email:
+            error_messages.append("Email is required.")
+        if not new_password:
+            error_messages.append("Password is required.")
+
+        if error_messages:
+            for error in error_messages:
+                st.error(error)
+        elif new_username in config['credentials']['usernames']:
+            st.error("Username already exists")
         else:
-            st.error("Please fill in all fields")
+            config['credentials']['usernames'][new_username] = {
+                'name': new_name,
+                'email': new_email,
+                'password': stauth.Hasher([new_password]).generate()[0],
+                'is_admin': is_admin
+            }
+            # Always use absolute path for config/config.yaml
+            config_path = os.path.abspath(os.path.join('config', 'config.yaml'))
+            try:
+                # Save the config
+                with open(config_path, 'w') as file:
+                    yaml.dump(config, file)
+                
+                # Small delay to ensure file is written
+                time.sleep(1)
+                
+                # Verify the config was saved
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as file:
+                        saved_config = yaml.safe_load(file)
+                        if new_username in saved_config.get('credentials', {}).get('usernames', {}):
+                            st.success("✅ Configuration saved successfully")
+                            # Update the in-memory config so the new user appears immediately
+                            users[new_username] = {
+                                'name': new_name,
+                                'email': new_email,
+                                'password': stauth.Hasher([new_password]).generate()[0],
+                                'is_admin': is_admin
+                            }
+                        else:
+                            st.error("❌ Configuration was not saved correctly")
+                            st.stop()
+                else:
+                    st.error("❌ Configuration file was not found after saving")
+                    st.stop()
+                
+                # Create a placeholder for the backup status
+                backup_status = st.empty()
+                
+                # Trigger a backup after adding a user
+                backup_status.info("🔄 Creating backup of updated configuration...")
+                backup_success = backup_manager.run_backup()
+                
+                if backup_success:
+                    backup_status.success("✅ Backup completed successfully")
+                    st.session_state.backup_list = list_gcs_backups()
+                else:
+                    backup_status.warning("⚠️ User was added but backup failed. Please create a manual backup from the Backup Management tab.")
+                    st.stop()
+                    
+            except Exception as e:
+                st.error(f"❌ Error saving configuration: {str(e)}")
+                st.stop()
 
 with tab2:
-    st.header("Data Upload")
+    st.header("File and Database Management")
     
     # Initialize GCS file list cache and upload_in_progress in session state
     if 'upload_in_progress' not in st.session_state:
@@ -782,14 +816,6 @@ with tab2:
                         # Example: if st.radio(..., key="my_conflict_action"), then:
                         # effective_conflict_action = st.session_state.my_conflict_action
                         # For this implementation, we need to ensure `conflict_action` is available.
-                        # Let's assume `conflict_action` (the variable) is still in scope and holds the user's choice.
-                        # This is a potential point of failure if `conflict_action` is not properly managed.
-                        # If the original `conflict_action` variable is not available, we must define it.
-                        # One way is to get it from session state if the radio button had a key.
-                        # Let's assume the `conflict_action` variable is defined in the broader scope.
-                        # This part of the code is executed after a rerun, so local variables from before the rerun are lost
-                        # unless stored in session_state.
-
                         # Let's assume `conflict_action` is available. This is a simplification.
                         # For robustness, store the radio button's choice in st.session_state.
                         # e.g., conflict_action = st.radio(..., key="conflict_choice")
@@ -1154,8 +1180,12 @@ with tab3:
     # Create a DataFrame for better display
     backup_df = pd.DataFrame(backups)
     # Ensure the DataFrame maintains the sorted order
-    backup_df = backup_df[['display_date', 'environment', 'size']]
-    backup_df.columns = ['Date & Time', 'Environment', 'Size']
+    if not backup_df.empty:
+        backup_df = backup_df[['display_date', 'environment', 'db_rows']]
+        backup_df.columns = ['Date & Time', 'Environment', 'DB Rows']
+    else:
+        # If backups is empty, create an empty DataFrame with the correct columns
+        backup_df = pd.DataFrame(columns=['Date & Time', 'Environment', 'DB Rows'])
     # Add a checkbox column on the left
     backup_df.insert(0, 'Select', False)
     
@@ -1180,12 +1210,13 @@ with tab3:
                 "Environment",
                 width="small",
             ),
-            "Size": st.column_config.TextColumn(
-                "Size",
+            "DB Rows": st.column_config.TextColumn(
+                "DB Rows",
+                help="Number of rows in the podcasts table of the backup (N/A for older backups)",
                 width="small",
-            ),
+            )
         },
-        disabled=["Date & Time", "Environment", "Size"],
+        disabled=["Date & Time", "Environment", "DB Rows"],
     )
     
     # Get selected backups
@@ -1221,12 +1252,14 @@ with tab3:
                             break
                     
                     if config_found:
-                        st.success("✅ Config file found in backup")
+                        st.info("✅ Config file found in backup")
                         # Read and display config contents
                         with open(config_path, 'r') as f:
                             config_content = yaml.safe_load(f)
-                            st.write("### Config File Contents")
-                            st.json(config_content)
+                            # st.write("### Config File Contents") # Removed detailed display
+                            # st.json(config_content) # Removed detailed display
+                            num_users = len(config_content.get('credentials', {}).get('usernames', {}))
+                            st.info(f"Total users in backup config: {num_users}")
                     else:
                         st.error("❌ Config file not found in backup!")
                     
@@ -1291,93 +1324,111 @@ with tab3:
     # --- RESTORE PANEL ---
     st.markdown("---")
     st.subheader("Restore Backup")
-    if backups:
-        selected_backup = st.selectbox(
-            "Select a backup to restore",
-            backups,
-            format_func=lambda x: f"{x['display_date']} ({x['environment']}, {x['size']})"
-        )
-        if selected_backup:
-            if st.button("Restore Selected Backup", key="restore_selected_backup_cloud"):
-                try:
-                    with st.spinner("Restoring backup..."):
-                        env = os.environ.copy()
-                        env["CLOUDSDK_PYTHON"] = "python3.11"
-                        
-                        # Determine restore directory based on environment
-                        if os.path.exists("/app/data"):
-                            restore_dir = "/app/data"
-                        else:
-                            restore_dir = os.path.join(os.getcwd(), "data")
-                        
-                        # Create temp directory for extraction
-                        temp_dir = os.path.join(restore_dir, "temp")
-                        os.makedirs(temp_dir, exist_ok=True)
-                        
-                        temp_file = os.path.join(temp_dir, "selected_backup.tar.gz")
-                        subprocess.run(
-                            ["gsutil", "cp", selected_backup['url'], temp_file],
-                            check=True,
-                            env=env
-                        )
-                        
-                        # Extract to temp directory first
-                        extract_dir = os.path.join(temp_dir, "extract")
-                        os.makedirs(extract_dir, exist_ok=True)
-                        
-                        subprocess.run(
-                            ["tar", "-xzf", temp_file, "-C", extract_dir],
-                            check=True
-                        )
-                        
-                        # Move files to the correct location
-                        db_found = False
-                        config_found = False
-                        for root, dirs, files in os.walk(extract_dir):
-                            # Restore podcasts.db
-                            if "podcasts.db" in files:
-                                src_db = os.path.join(root, "podcasts.db")
-                                dest_db = os.path.join(restore_dir, "podcasts.db")
-                                shutil.move(src_db, dest_db)
-                                db_found = True
-                            # Restore config.yaml
-                            if "config.yaml" in files:
-                                # Determine config directory
-                                if os.path.exists("/app/config"):
-                                    config_dir = "/app/config"
-                                else:
-                                    config_dir = os.path.join(os.getcwd(), "config")
-                                src_config = os.path.join(root, "config.yaml")
-                                dest_config = os.path.join(config_dir, "config.yaml")
-                                shutil.move(src_config, dest_config)
-                                os.chmod(dest_config, 0o600)
-                                config_found = True
-                        
-                        # Clean up temp files
-                        shutil.rmtree(temp_dir)
-                        
-                        if db_found:
-                            st.success(f"Successfully restored from backup: {selected_backup['display_date']}")
-                            if config_found:
-                                st.info("Config file was also restored from backup.")
-                                print("[DEBUG] ADMIN: Config restored. Forcing auth reset and page refresh.")
-                                # Force a full reset of authentication state
-                                st.session_state.auth_initialized = False
-                                st.session_state.authenticator = None
-                                st.session_state.config = None
-                                st.session_state.authentication_status = None
-                                st.session_state.name = None
-                                st.session_state.username = None
-                                
-                                # Inform user and stop to allow manual refresh, which is more reliable
-                                st.warning("Restore complete. Please REFRESH your browser page to apply changes and log in.")
-                                st.stop() # Stop execution to force refresh
+
+    if len(selected_backups) == 1:
+        backup_to_restore = selected_backups[0]
+        st.info(f"Selected for restore: {backup_to_restore['filename']} ({backup_to_restore['environment']}, DB Rows: {backup_to_restore['db_rows']})")
+        if st.button(f"Restore Backup: {backup_to_restore['filename']}", key="restore_selected_backup_from_table"):
+            try:
+                with st.spinner(f"Restoring backup: {backup_to_restore['filename']}..."):
+                    env = os.environ.copy()
+                    env["CLOUDSDK_PYTHON"] = "python3.11"
+                    
+                    # Determine restore directory based on environment
+                    if os.path.exists("/app/data"):
+                        restore_dir = "/app/data"
+                    else:
+                        restore_dir = os.path.join(os.getcwd(), "data")
+                    
+                    # Create temp directory for extraction
+                    temp_dir = os.path.join(restore_dir, "temp_restore_extraction") # Unique temp dir name
+                    os.makedirs(temp_dir, exist_ok=True)
+                    
+                    temp_file = os.path.join(temp_dir, "selected_backup_to_restore.tar.gz")
+                    subprocess.run(
+                        ["gsutil", "cp", backup_to_restore['url'], temp_file],
+                        check=True,
+                        env=env,
+                        capture_output=True, text=True
+                    )
+                    
+                    # Extract to temp directory first
+                    extract_dir = os.path.join(temp_dir, "extract")
+                    os.makedirs(extract_dir, exist_ok=True)
+                    
+                    subprocess.run(
+                        ["tar", "-xzf", temp_file, "-C", extract_dir],
+                        check=True,
+                        capture_output=True, text=True
+                    )
+                    
+                    # Move files to the correct location
+                    db_found_in_restore = False
+                    config_found_in_restore = False
+                    for root, dirs, files_in_root in os.walk(extract_dir):
+                        # Restore podcasts.db
+                        if "podcasts.db" in files_in_root:
+                            src_db = os.path.join(root, "podcasts.db")
+                            dest_db = os.path.join(restore_dir, "podcasts.db")
+                            # Ensure data directory exists
+                            os.makedirs(os.path.dirname(dest_db), exist_ok=True)
+                            shutil.move(src_db, dest_db)
+                            db_found_in_restore = True
+                        # Restore config.yaml
+                        if "config.yaml" in files_in_root:
+                            # Determine config directory
+                            if os.path.exists("/app/config"):
+                                config_dir_restore = "/app/config"
                             else:
-                                st.warning("Config file was NOT found in the backup archive. Database restored, but login may be affected.")
-                                st.info("Please restart the app or redeploy to ensure data consistency.")
+                                config_dir_restore = os.path.join(os.getcwd(), "config")
+                            os.makedirs(config_dir_restore, exist_ok=True)
+                            src_config = os.path.join(root, "config.yaml")
+                            dest_config = os.path.join(config_dir_restore, "config.yaml")
+                            shutil.move(src_config, dest_config)
+                            os.chmod(dest_config, 0o600) # Ensure correct permissions
+                            config_found_in_restore = True
+                    
+                    # Clean up temp files
+                    shutil.rmtree(temp_dir)
+                    
+                    if db_found_in_restore:
+                        st.success(f"Successfully restored database from backup: {backup_to_restore['display_date']}")
+                        if config_found_in_restore:
+                            st.info("Config file was also restored from backup.")
+                            print("[DEBUG] ADMIN: Config restored. Forcing auth reset and page refresh.")
+                            # Force a full reset of authentication state
+                            st.session_state.auth_initialized = False
+                            st.session_state.authenticator = None
+                            st.session_state.config = None
+                            st.session_state.authentication_status = None
+                            st.session_state.name = None
+                            st.session_state.username = None
+                            
+                            # Inform user and stop to allow manual refresh, which is more reliable
+                            st.warning("Restore complete. Please REFRESH your browser page to apply changes and log in.")
+                            st.stop() # Stop execution to force refresh
                         else:
-                            st.error("Restore completed, but podcasts.db was not found in the backup archive.")
-                except Exception as e:
-                    st.error(f"Error restoring backup: {str(e)}")
-    else:
-        st.info("No backups found in Cloud Storage yet.") 
+                            st.warning("Config file was NOT found in the backup archive. Database restored, but login/config may be affected if it was part of the backup intent.")
+                            st.info("If config was expected, manual check or app restart might be needed.")
+                    else:
+                        st.error("Restore completed, but podcasts.db was not found in the backup archive.")
+            except subprocess.CalledProcessError as spe:
+                st.error(f"Error during restore (command execution failed): {spe.stderr}")
+            except Exception as e:
+                st.error(f"Error restoring backup: {str(e)}")
+    elif len(selected_backups) > 1:
+        st.warning("Please select only one backup to restore.")
+    else: # 0 selected, or if 'backups' itself is empty
+        if not backups: # Check if there are any backups listed at all
+            st.info("No backups found in Cloud Storage yet.")
+        else:
+            st.info("Select a single backup from the table above to enable the restore option.")
+
+    # The old selectbox-based restore logic is now removed by virtue of not being included here.
+    # Ensure the following lines which defined the old st.selectbox and its logic are effectively replaced/removed.
+    # if backups:
+    #     selected_backup_old_selectbox = st.selectbox(
+    #         "Select a backup to restore",
+    # ... (rest of old logic) ...
+    # else:
+    #     st.info("No backups found in Cloud Storage yet.") 

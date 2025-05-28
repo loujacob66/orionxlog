@@ -42,8 +42,25 @@ if [ ! -f "${CONFIG_DIR}/config.yaml" ]; then
     exit 1
 fi
 
-# Create backup archive
-BACKUP_FILE="${BACKUP_DIR}/backup_${TIMESTAMP}_${ENVIRONMENT}.tar.gz"
+# Count rows in the database
+DB_ROW_COUNT="0" # Default to 0 if sqlite3 is not available or table doesn't exist
+if command -v sqlite3 &> /dev/null && [ -f "$DB_PATH" ]; then
+    DB_ROW_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM podcasts;" 2>/dev/null || echo "0")
+    # If sqlite3 failed (e.g. table not found), it might output an error to stderr and non-zero exit.
+    # The '|| echo "0"' ensures DB_ROW_COUNT is set to "0" in such cases.
+    # A more robust check might be needed if 'podcasts' table might not exist yet.
+    # For now, assume if db file exists, table should too, or count is 0.
+    if ! [[ "$DB_ROW_COUNT" =~ ^[0-9]+$ ]]; then # Ensure it's a number
+        echo "Warning: Failed to get valid row count from database. Defaulting to 0."
+        DB_ROW_COUNT="0"
+    fi
+else
+    echo "Warning: sqlite3 command not found or DB path incorrect. Row count will be 0."
+fi
+echo "Database row count: $DB_ROW_COUNT"
+
+# Create backup archive filename including row count
+BACKUP_FILE="${BACKUP_DIR}/backup_${TIMESTAMP}_${ENVIRONMENT}_rows-${DB_ROW_COUNT}.tar.gz"
 echo "Creating backup archive: $BACKUP_FILE"
 
 # Create temporary directory for backup

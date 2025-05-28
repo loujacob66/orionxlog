@@ -146,7 +146,6 @@ if st.session_state.authentication_status is None:
         st.error('Username/password is incorrect')
         st.stop()
     elif authentication_status == None:
-        st.warning('Please enter your username and password')
         st.stop()
     else:
         st.session_state.authentication_status = authentication_status
