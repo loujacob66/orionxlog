@@ -47,11 +47,11 @@ LATEST_TIMESTAMP=""
 echo "Available backups:"
 while IFS= read -r backup; do
     filename=$(basename "$backup")
-    if [[ $filename =~ backup_([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{2}-[0-9]{2}-[0-9]{2})_UTC_([^.]+)\.tar\.gz ]] || 
-       [[ $filename =~ backup_([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{2}-[0-9]{2}-[0-9]{2})_([^.]+)_[0-9]+K_unknownrows\.tar\.gz ]]; then
+    if [[ $filename =~ backup_([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{2}-[0-9]{2}-[0-9]{2})_UTC_([^._]+)_rows-([0-9]+|NA)\.tar\.gz ]]; then
         date_str="${BASH_REMATCH[1]}"
         time_str="${BASH_REMATCH[2]}"
         env="${BASH_REMATCH[3]}"
+        # Rows group is BASH_REMATCH[4], not explicitly used here for sorting, but matched.
         
         # Convert UTC to local time using Python
         utc_timestamp="${date_str} ${time_str}"
@@ -132,10 +132,11 @@ echo "Found backup: $LATEST_BACKUP"
 
 # Extract date and time from backup filename
 filename=$(basename "$LATEST_BACKUP")
-if [[ $filename =~ backup_([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{2}-[0-9]{2}-[0-9]{2})_UTC_([^.]+)\.tar\.gz ]]; then
+if [[ $filename =~ backup_([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{2}-[0-9]{2}-[0-9]{2})_UTC_([^._]+)_rows-([0-9]+|NA)\.tar\.gz ]]; then
     BACKUP_DATE="${BASH_REMATCH[1]}"
     BACKUP_TIME="${BASH_REMATCH[2]}"
     BACKUP_ENV="${BASH_REMATCH[3]}"
+    # Rows group is BASH_REMATCH[4]
     utc_timestamp="${BACKUP_DATE} ${BACKUP_TIME}"
     # Convert UTC to local time using Python
     local_timestamp=$(python3 -c "
@@ -166,16 +167,16 @@ if ! tar -xzf "${TEMP_DIR}/backup.tar.gz" -C "$TEMP_DIR"; then
 fi
 
 # Restore config
-if [ -f "${TEMP_DIR}/config/config.yaml" ]; then
+if [ -f "${TEMP_DIR}/config.yaml" ]; then
     echo "Restoring config..."
-    cp "${TEMP_DIR}/config/config.yaml" "${CONFIG_DIR}/config.yaml"
+    cp "${TEMP_DIR}/config.yaml" "${CONFIG_DIR}/config.yaml"
     chmod 600 "${CONFIG_DIR}/config.yaml"
 fi
 
 # Restore database
-if [ -f "${TEMP_DIR}/data/podcasts.db" ]; then
+if [ -f "${TEMP_DIR}/podcasts.db" ]; then
     echo "Restoring database..."
-    cp "${TEMP_DIR}/data/podcasts.db" "${RESTORE_DIR}/podcasts.db"
+    cp "${TEMP_DIR}/podcasts.db" "${RESTORE_DIR}/podcasts.db"
     chmod 600 "${RESTORE_DIR}/podcasts.db"
 else
     echo "Error: Database not found in backup"

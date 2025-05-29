@@ -29,14 +29,19 @@ import sqlite3 # Added for get_db_row_count
 # Define directory paths
 if os.path.exists("/app/data"):
     # Cloud environment
-    backups_dir = os.path.join("/app/data", "backups")
-    permanent_upload_dir = os.path.join("/app/data", "uploaded")
+    data_dir = "/app/data" # Define data_dir for cloud
+    backups_dir = os.path.join(data_dir, "backups")
+    permanent_upload_dir = os.path.join(data_dir, "uploaded")
 else:
     # Local environment
-    backups_dir = os.path.join("data", "backups")
-    permanent_upload_dir = os.path.join("data", "uploaded")
+    data_dir = "data" # Define data_dir for local
+    backups_dir = os.path.join(data_dir, "backups")
+    permanent_upload_dir = os.path.join(data_dir, "uploaded")
+
+database_file_path = os.path.join(data_dir, "podcasts.db")
 
 # Create directories if they don't exist
+os.makedirs(data_dir, exist_ok=True) # Ensure base data directory exists too
 os.makedirs(backups_dir, exist_ok=True)
 os.makedirs(permanent_upload_dir, exist_ok=True)
 
@@ -121,57 +126,170 @@ def list_bucket_files():
         st.error(f"Unexpected error while listing GCS files: {str(e)}")
         return []
 
-def upload_to_bucket(file_data, filename):
-    """Upload a file to the GCS bucket."""
+def upload_to_bucket(files_data_list, filenames_list):
+    """Upload multiple files to the GCS bucket using a single gsutil -m cp command."""
+    if not files_data_list or not filenames_list or len(files_data_list) != len(filenames_list):
+        st.warning("upload_to_bucket: Mismatch or empty file lists provided.")
+        return {"success": 0, "error": 0, "skipped": 0}
+
     try:
         env = os.environ.copy()
         env["CLOUDSDK_PYTHON"] = "python3.11"
-        
-        # Create a temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as temp_file:
-            temp_file.write(file_data.getvalue())
-            temp_file.flush()
+
+        with tempfile.TemporaryDirectory() as temp_dir_for_upload:
+            local_files_to_upload_for_gsutil_cmd = []
             
-            # Upload using gsutil
+            for file_data_item, filename_item in zip(files_data_list, filenames_list):
+                local_filepath = os.path.join(temp_dir_for_upload, filename_item)
+                try:
+                    with open(local_filepath, 'wb') as f:
+                        f.write(file_data_item.getvalue())
+                    local_files_to_upload_for_gsutil_cmd.append(local_filepath)
+                except Exception as e:
+                    st.error(f"Failed to write temporary file {filename_item}: {e}")
+                    # Decide how to count this error - perhaps add to a separate error list
+                    # For now, this means it won't be part of the gsutil command.
+            
+            if not local_files_to_upload_for_gsutil_cmd:
+                st.info("No files were prepared for upload after temporary writing.")
+                return {"success": 0, "error": len(filenames_list), "skipped": 0} # All failed if none prepared
+
+            # Command: gsutil -m cp /tmp/somedir/fileA.xlsx /tmp/somedir/fileB.xls ... gs://BUCKET_URL/
+            cmd = ["gsutil", "-m", "cp"] + local_files_to_upload_for_gsutil_cmd + [f"{BUCKET_URL}/"]
+            
+            # st.write(f"Executing GCS Upload Command: {' '.join(cmd)}") # For debugging
+
             result = subprocess.run(
-                ["gsutil", "cp", temp_file.name, f"{BUCKET_URL}/{filename}"],
+                cmd,
                 capture_output=True,
                 text=True,
-                check=True,
+                check=True, 
                 env=env
             )
+            # If check=True, CalledProcessError is raised on non-zero exit.
+            # gsutil -m cp can have partial successes/failures.
+            # A non-zero exit code usually means at least one file failed.
+            # Parsing stderr for "Some files failed" is more robust for -m.
             
-            # Clean up temp file
-            os.unlink(temp_file.name)
-            return True
+            # For simplicity here, if no exception, assume all specified local files were attempted.
+            # A more advanced version would parse `result.stderr` for per-file errors if `check=False`.
+            return {"success": len(local_files_to_upload_for_gsutil_cmd), "error": 0, "skipped": 0}
+
     except subprocess.CalledProcessError as e:
-        st.error(f"Error uploading file: {e.stderr}")
-        return False
+        st.error(f"Error during batch GCS upload (gsutil command failed): {e.stderr}")
+        # It's hard to know exactly how many succeeded/failed from a general CalledProcessError with -m
+        # without parsing stderr. Assume all attempted files in this batch failed for simplicity.
+        return {"success": 0, "error": len(filenames_list), "skipped": 0}
     except Exception as e:
-        st.error(f"Unexpected error: {str(e)}")
-        return False
+        st.error(f"Unexpected error during batch GCS upload preparation or execution: {str(e)}")
+        return {"success": 0, "error": len(filenames_list), "skipped": 0}
+    # TemporaryDirectory cleans itself up automatically.
 
 def delete_from_bucket(filenames):
-    """Delete files from the GCS bucket."""
+    """Delete multiple files from the GCS bucket using a single gsutil -m rm command."""
+    if not filenames:
+        return {"success": 0, "error": 0} # No files to delete
+
     try:
         env = os.environ.copy()
         env["CLOUDSDK_PYTHON"] = "python3.11"
         
-        for filename in filenames:
-            subprocess.run(
-                ["gsutil", "rm", f"{BUCKET_URL}/{filename}"],
-                capture_output=True,
-                text=True,
-                check=True,
-                env=env
-            )
-        return True
+        # Construct full GCS paths for each filename
+        gcs_paths_to_delete = [f"{BUCKET_URL}/{filename}" for filename in filenames]
+        
+        # Command: gsutil -m rm gs://bucket/file1 gs://bucket/file2 ...
+        cmd = ["gsutil", "-m", "rm"] + gcs_paths_to_delete
+        
+        # st.write(f"Executing GCS Delete Command: {' '.join(cmd)}") # For debugging
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True, # Will raise CalledProcessError on failure
+            env=env
+        )
+        # If check=True and no error, assume all specified files were deleted successfully by gsutil.
+        # Similar to upload, robustly determining partial success/failure from `gsutil -m rm` output 
+        # without `check=True` would require parsing stderr.
+        return {"success": len(filenames), "error": 0}
+
     except subprocess.CalledProcessError as e:
-        st.error(f"Error deleting files: {e.stderr}")
-        return False
+        st.error(f"Error during batch GCS delete (gsutil command failed): {e.stderr}")
+        # Assume all attempted files in this batch failed for simplicity if the command itself fails.
+        return {"success": 0, "error": len(filenames)}
     except Exception as e:
-        st.error(f"Unexpected error: {str(e)}")
-        return False
+        st.error(f"Unexpected error during batch GCS delete: {str(e)}")
+        return {"success": 0, "error": len(filenames)}
+
+def batch_download_from_bucket(gcs_filenames, local_temp_dir):
+    """Download multiple files from GCS to a local temporary directory in parallel."""
+    if not gcs_filenames:
+        st.info("No GCS filenames provided for batch download.")
+        return {}, [] # No files to download, no successes, no failures
+
+    env = os.environ.copy()
+    env["CLOUDSDK_PYTHON"] = "python3.11"
+    
+    gcs_full_paths = [f"{BUCKET_URL}/{filename}" for filename in gcs_filenames]
+    
+    # Command: gsutil -m cp gs://bucket/file1 gs://bucket/file2 ... /local/temp/dir/
+    cmd = ["gsutil", "-m", "cp"] + gcs_full_paths + [local_temp_dir]
+    
+    downloaded_files_map = {}
+    failed_files = []
+
+    try:
+        # st.write(f"Executing GCS Batch Download Command: {' '.join(cmd)}") # For debugging
+        # Using subprocess.run which waits for completion.
+        # Real-time progress from gsutil -m is complex to capture and display in Streamlit
+        # without streaming, so we'll show a general message.
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False, # We will check stderr for failures, as -m can have partial success
+            env=env
+        )
+
+        # After gsutil -m cp, successfully copied files will be in local_temp_dir.
+        # We need to confirm which ones actually made it.
+        for original_filename in gcs_filenames:
+            local_path = os.path.join(local_temp_dir, original_filename)
+            if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+                downloaded_files_map[original_filename] = local_path
+            else:
+                # File wasn't found locally or is empty, assume it failed or was skipped by gsutil.
+                failed_files.append(original_filename)
+        
+        # Check stderr for common gsutil -m error patterns if some files are missing
+        if result.stderr:
+            # gsutil -m cp is tricky: it can succeed for some files and fail for others,
+            # and the overall exit code might still be 0 if at least one file succeeded,
+            # or non-zero if any file failed.
+            # A simple check is to see if stderr contains "Some files failed" or "Error".
+            if "Some files failed" in result.stderr or "Error:" in result.stderr.lower() or result.returncode != 0:
+                 # This indicates gsutil itself reported issues. Our file existence check above
+                 # should catch most individual failures. This is a general warning.
+                 st.warning(f"gsutil reported some issues during batch download.Stderr: {result.stderr[:500]}...") # Log snippet of stderr
+            # If no specific error message and all files are present, we can assume success.
+            # If some files are missing but gsutil didn't explicitly report "Some files failed", they might have been skipped for other reasons.
+
+        if not downloaded_files_map and gcs_filenames: # No files downloaded, but some were expected
+             st.error("Batch download command ran, but no files were successfully downloaded to the temporary directory.")
+             failed_files = list(gcs_filenames) # Mark all as failed if none were found
+
+        return downloaded_files_map, failed_files
+
+    except subprocess.CalledProcessError as e: # Should not be hit if check=False, but good practice
+        st.error(f"Critical error executing gsutil batch download (CalledProcessError): {e.stderr}")
+        return {}, list(gcs_filenames) # All failed
+    except FileNotFoundError: # gsutil not found
+        st.error("gsutil command not found. Please ensure Google Cloud SDK is installed and in PATH.")
+        return {}, list(gcs_filenames)
+    except Exception as e:
+        st.error(f"Unexpected error during GCS batch download: {str(e)}")
+        return {}, list(gcs_filenames) # All failed
 
 def download_from_bucket(filename):
     """Download a file from the GCS bucket to a temporary location."""
@@ -425,6 +543,12 @@ if not hasattr(st.session_state, 'backup_scheduler_started'):
 if 'backup_list' not in st.session_state:
     st.session_state.backup_list = list_gcs_backups()
 
+# For backup management data editor state
+if 'backup_management_editor_key' not in st.session_state:
+    st.session_state.backup_management_editor_key = 0
+if 'backup_management_df' not in st.session_state:
+    st.session_state.backup_management_df = None
+
 st.title("Admin Dashboard")
 
 # Create tabs for different admin functions
@@ -667,6 +791,26 @@ with tab2:
     if 'file_management_df' not in st.session_state:
         st.session_state.file_management_df = None 
 
+    # Initialize session state for batch import if not exists
+    if 'multi_batch_import_active' not in st.session_state:
+        st.session_state.multi_batch_import_active = False
+    if 'gcs_files_for_batch_import' not in st.session_state:
+        st.session_state.gcs_files_for_batch_import = []
+    if 'batch_import_temp_dir' not in st.session_state:
+        st.session_state.batch_import_temp_dir = None
+    if 'batch_downloaded_files_map' not in st.session_state:
+        st.session_state.batch_downloaded_files_map = {}
+    if 'batch_failed_to_download_files' not in st.session_state:
+        st.session_state.batch_failed_to_download_files = []
+    if 'batch_import_current_idx' not in st.session_state:
+        st.session_state.batch_import_current_idx = 0
+    if 'batch_import_total_stats' not in st.session_state:
+        st.session_state.batch_import_total_stats = {} # Will be properly initialized when an import starts
+    if 'batch_import_options' not in st.session_state:
+        st.session_state.batch_import_options = {}
+    if 'batch_import_initial_setup_done' not in st.session_state:
+        st.session_state.batch_import_initial_setup_done = False
+
     REFRESH_INTERVAL = timedelta(minutes=5)
 
     # --- GCS File List Loading and Caching ---
@@ -761,96 +905,65 @@ with tab2:
             st.session_state.gcs_files_last_refreshed = None
             st.rerun()
         else:
-            success_count = 0
-            error_count = 0
+            actual_files_to_upload_data = []
+            actual_files_to_upload_names = []
             skipped_count = 0
-            total_files = len(uploaded_files)
             
-            # Use the cached GCS file list for checking existence during upload
-            # Ensure it's fresh or re-fetch if absolutely necessary (though top-level cache logic should handle it)
-            if st.session_state.gcs_bucket_files is None:
-                 with st.spinner("Final check on GCS files before upload..."):
-                    st.session_state.gcs_bucket_files = list_bucket_files()
-                    st.session_state.gcs_files_last_refreshed = datetime.now(timezone.utc).replace(tzinfo=timezone.utc)
-            
+            # Determine conflict action and existing files again, as state might be lost on rerun
+            # This assumes `has_conflicts` was determined correctly before this block was entered.
+            # And `conflict_radio_choice` holds the selection from st.radio.
             current_gcs_files_for_upload = st.session_state.gcs_bucket_files if st.session_state.gcs_bucket_files is not None else []
             existing_names_for_upload = [f['name'] for f in current_gcs_files_for_upload]
-            
-            # Determine conflict action
-            current_conflict_action = "Skip existing files" # Default, or retrieve from session_state if set
-            if has_conflicts: # has_conflicts should also be determined before this block or stored
-                 # This assumes 'conflict_action' is available from the previous run's st.radio
-                 # A robust way: store conflict_action in st.session_state if it's chosen
-                 # For this example, we'll rely on it being re-evaluated or we use a default.
-                 # To make st.radio's value persist, give it a key and read from st.session_state[key]
-                 if 'conflict_action_choice' in st.session_state:
-                     current_conflict_action = st.session_state.conflict_action_choice
-                 else:
-                     # If not in session state, it implies the radio button might not have been rendered
-                     # or its state needs to be explicitly captured.
-                     # This part of the logic might need adjustment based on how `conflict_action` is determined.
-                     # For now, we assume `conflict_action` was available from the UI before this button was pressed.
-                     # If `has_conflicts` is true, `conflict_action` should have been determined.
-                     # This part is tricky with reruns. Let's assume `conflict_action` is somehow available.
-                     # To be safe, let's ensure `conflict_action` is defined if `has_conflicts` is true.
-                     # This could be done by retrieving it from st.session_state if it was stored there.
-                     # For this edit, we'll assume `conflict_action` is accessible.
-                     pass
+            chosen_conflict_action = st.session_state.get("conflict_radio_choice", "Skip existing files")
 
             progress_placeholder = st.empty()
+            progress_placeholder.info(f"Preparing {len(uploaded_files)} selected file(s) for batch upload...")
 
-            for i, file in enumerate(uploaded_files):
-                progress_placeholder.info(f"Processing file {i+1} of {total_files}: {file.name}...")
-                
-                if file.name in existing_names_for_upload:
-                    # Need to access conflict_action here. Assuming it's available or passed.
-                    # If `conflict_action` was from an st.radio, its state must be managed across reruns,
-                    # typically by using a key and accessing st.session_state.
-                    # For this example, we'll assume `conflict_action` is defined in the scope.
-                    # To make this robust, if `has_conflicts` is true, the choice from `st.radio`
-                    # (with a key) should be read from `st.session_state`.
-
-                    effective_conflict_action = "Skip existing files" # Default
-                    if has_conflicts: # Check if conflict handling is relevant
-                        # If `conflict_action` was defined by `st.radio` with a key, retrieve it here.
-                        # Example: if st.radio(..., key="my_conflict_action"), then:
-                        # effective_conflict_action = st.session_state.my_conflict_action
-                        # For this implementation, we need to ensure `conflict_action` is available.
-                        # Let's assume `conflict_action` is available. This is a simplification.
-                        # For robustness, store the radio button's choice in st.session_state.
-                        # e.g., conflict_action = st.radio(..., key="conflict_choice")
-                        # then here: chosen_action = st.session_state.get("conflict_choice", "Skip existing files")
-                        chosen_action = st.session_state.get("conflict_radio_choice", "Skip existing files") # Fallback
-
-                        if file.name in existing_names_for_upload and chosen_action == "Skip existing files":
-                            skipped_count += 1
-                            progress_placeholder.info(f"File {i+1} of {total_files}: {file.name} skipped (already exists).")
-                            time.sleep(0.5) # Brief pause for readability
-                            continue
-                
-                if upload_to_bucket(file, file.name):
-                    success_count += 1
-                    progress_placeholder.success(f"File {i+1} of {total_files}: {file.name} uploaded successfully!")
+            for file_data in uploaded_files:
+                if file_data.name in existing_names_for_upload and chosen_conflict_action == "Skip existing files":
+                    skipped_count += 1
+                    st.write(f"Skipping existing file: {file_data.name}") # More immediate feedback
                 else:
-                    error_count += 1
-                    progress_placeholder.error(f"File {i+1} of {total_files}: {file.name} failed to upload.")
-                time.sleep(0.5) # Brief pause for readability
+                    actual_files_to_upload_data.append(file_data)
+                    actual_files_to_upload_names.append(file_data.name)
             
+            success_count = 0
+            error_count = 0
+
+            if actual_files_to_upload_names:
+                progress_placeholder.info(f"Starting batch upload of {len(actual_files_to_upload_names)} file(s) to GCS...")
+                upload_results = upload_to_bucket(actual_files_to_upload_data, actual_files_to_upload_names)
+                success_count = upload_results.get("success", 0)
+                error_count = upload_results.get("error", 0)
+                # Note: The batch uploader doesn't currently track skipped, assumes files passed are all attempted.
+                # The skipped_count here is from the pre-check.
+                if success_count > 0:
+                    progress_placeholder.success(f"Batch upload processed. {success_count} file(s) reported as successful by gsutil.")
+                if error_count > 0:
+                    progress_placeholder.error(f"Batch upload processed. {error_count} file(s) reported as failed by gsutil.")
+                if success_count == 0 and error_count == 0 and skipped_count == 0 and len(actual_files_to_upload_names) > 0:
+                    progress_placeholder.warning("Batch upload command executed but reported no successes or errors for the attempted files.")
+            elif skipped_count > 0:
+                progress_placeholder.info("No new files to upload after skipping existing ones.")
+            else:
+                progress_placeholder.info("No files were selected or prepared for upload.")
+            
+            time.sleep(1) # Brief pause for messages to be read
             progress_placeholder.empty() # Clear the last progress message
             
             # Show detailed results
             if success_count > 0:
-                st.success(f"Successfully uploaded {success_count} file(s)")
+                st.success(f"Successfully uploaded {success_count} file(s) in batch.")
             if error_count > 0:
-                st.error(f"Failed to upload {error_count} file(s)")
+                st.error(f"Failed to upload {error_count} file(s) in batch.")
             if skipped_count > 0:
-                st.info(f"Skipped {skipped_count} existing file(s)")
+                st.info(f"Skipped {skipped_count} existing file(s) based on choice.")
             
             if success_count > 0 or error_count > 0 or skipped_count > 0:
-                st.session_state['uploader_key'] += 1
+                st.session_state['uploader_key'] += 1 # Reset file uploader
             
             st.session_state.upload_in_progress = False # Reset the flag
-            st.session_state.gcs_bucket_files = None # Invalidate GCS file cache
+            st.session_state.gcs_bucket_files = None # Invalidate GCS file cache to reflect new files
             st.session_state.gcs_files_last_refreshed = None
             st.rerun() # Rerun to re-enable button, clear state, and refresh file list
     
@@ -1013,140 +1126,241 @@ with tab2:
         st.info("No files found in the GCS bucket (or cache is empty). Try refreshing the list or upload some files.")
 
     # --- Processing Blocks (Full Width) ---
-    if st.session_state.get('import_button_pressed'):
-        files_to_import = st.session_state.files_for_action
-        options = st.session_state.import_options
+    # This section will now handle the new batch import logic
+    BATCH_SIZE = 25
+
+    if st.session_state.get('import_button_pressed') and not st.session_state.multi_batch_import_active:
+        # ---- START OF A NEW MULTI-BATCH IMPORT ----
+        selected_gcs_files = st.session_state.files_for_action
+        import_options = st.session_state.import_options
+
+        if not selected_gcs_files:
+            st.warning("No files were selected for import.")
+            st.session_state.import_button_pressed = False # Reset button state
+        else:
+            st.info(f"Initializing import for {len(selected_gcs_files)} file(s)...")
+            # Create a persistent temporary directory for this entire multi-batch operation
+            try:
+                st.session_state.batch_import_temp_dir = tempfile.mkdtemp(prefix="orionxlog_batch_import_")
+                st.write(f"DEBUG: Created persistent temp dir: {st.session_state.batch_import_temp_dir}") # DEBUG
+            except Exception as e:
+                st.error(f"Failed to create temporary directory for batch import: {e}")
+                st.session_state.import_button_pressed = False
+                # No rerun, allow user to see error.
+                # Make sure to clean up any partial state if needed later.
+                st.stop() # Stop execution to prevent further issues
+
+            st.session_state.multi_batch_import_active = True
+            st.session_state.gcs_files_for_batch_import = selected_gcs_files
+            st.session_state.batch_import_options = import_options
+            st.session_state.batch_import_current_idx = 0
+            st.session_state.batch_import_total_stats = {
+                'filename': 'Multiple Files (Batch Import)',
+                'sheets': {'processed': 0, 'total': 0},
+                'rows': {'scanned': 0, 'merged': 0, 'errors': 0},
+                'actual': {'inserted': 0, 'replaced': 0, 'ignored': 0},
+                'unprocessed_sheets_details': []
+            }
+            st.session_state.batch_downloaded_files_map = {}
+            st.session_state.batch_failed_to_download_files = []
+            st.session_state.batch_import_initial_setup_done = False # Will be set after download & initial DB ops
+
+            st.session_state.import_button_pressed = False # Reset the trigger
+            st.rerun() # Rerun to enter the active batch processing logic below
+
+    if st.session_state.multi_batch_import_active:
+        # ---- ACTIVE MULTI-BATCH IMPORT PROCESSING ----
+        gcs_files_to_process_overall = st.session_state.gcs_files_for_batch_import
+        temp_dir_for_this_run = st.session_state.batch_import_temp_dir
+        current_idx = st.session_state.batch_import_current_idx
+        options = st.session_state.batch_import_options
+        total_stats = st.session_state.batch_import_total_stats
+        
         override_db = options.get('override_db', False)
         reset_db = options.get('reset_db', False)
         perform_dry_run = options.get('perform_dry_run', False)
 
-        if not files_to_import:
-            st.warning("No files were selected for import.")
-        else:
-            st.info("Import process started...")
-            total_files_to_process = len(files_to_import)
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+        status_text_area = st.empty()
+        progress_bar_area = st.empty()
 
-            total_stats = {
-                'filename': 'Multiple Files', 
-                'sheets': {'processed': 0, 'total': 0},
-                'rows': {'scanned': 0, 'merged': 0, 'errors': 0},
-                'actual': {'inserted': 0, 'replaced': 0, 'ignored': 0},
-                'unprocessed_sheets_details': [] # New key to store details of unprocessed sheets
-            }
-            
-            try:
-                if not perform_dry_run and os.path.exists(os.path.join("data", "podcasts.db")):
+        if not temp_dir_for_this_run or not os.path.exists(temp_dir_for_this_run):
+            st.error("Critical error: Batch import temporary directory is missing. Aborting.")
+            # Reset state to allow starting over
+            st.session_state.multi_batch_import_active = False
+            st.session_state.batch_import_initial_setup_done = False
+            if temp_dir_for_this_run and os.path.exists(temp_dir_for_this_run): # Defensive cleanup
+                try: shutil.rmtree(temp_dir_for_this_run) 
+                except: pass
+            st.session_state.batch_import_temp_dir = None
+            st.rerun()
+
+        try:
+            if not st.session_state.batch_import_initial_setup_done:
+                status_text_area.info("Performing initial setup: DB operations and batch file download...")
+                # 1. One-time DB backup and reset (if configured)
+                if not perform_dry_run and os.path.exists(database_file_path):
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    backup_path = os.path.join(backups_dir, f"podcasts_{timestamp}.db")
-                    shutil.copy2(os.path.join("data", "podcasts.db"), backup_path)
-                    st.info(f"Created backup of current database: {backup_path}")
+                    initial_backup_path = os.path.join(backups_dir, f"podcasts_pre_batch_import_{timestamp}.db")
+                    shutil.copy2(database_file_path, initial_backup_path)
+                    st.success(f"Created pre-batch import backup of current database: {initial_backup_path}")
                 
                 if reset_db and not perform_dry_run:
-                    db_path = os.path.join("data", "podcasts.db")
-                    if os.path.exists(db_path):
-                        os.remove(db_path)
-                        st.info("Database has been reset before import.")
-                
-                for idx, filename in enumerate(files_to_import):
-                    status_text.text(f"Processing file {idx + 1}/{total_files_to_process}: {filename}...")
-                    temp_file = download_from_bucket(filename)
-                    if temp_file:
-                        try:
-                            file_exists = os.path.exists(temp_file)
-                            file_size = os.path.getsize(temp_file) if file_exists else 0
-                            if file_exists and file_size > 0:
-                                stats = import_data(
-                                    filepath=temp_file,
-                                    override=override_db,
-                                    dry_run=perform_dry_run,
-                                    reset_db=False, 
-                                    skip_backup=True,
-                                    original_filename=filename
-                                )
-                                # st.write("DEBUG: Stats object from import_data for file:", filename, stats) # Temporary debug line - will be removed
-                                if stats:
-                                    accumulate_stats(total_stats, stats)
-                                    with st.expander(f"Details for {filename}", expanded=False):
-                                        display_import_summary(stats, override_db, reset_db, perform_dry_run, is_final_summary=False, current_filename_for_display=filename)
-                                else:
-                                    st.error(f"Failed to get import statistics for {filename}.")
-                            else:
-                                st.error(f"File {filename} does not exist or is empty after download.")
-                        except Exception as e:
-                            st.error(f"Error processing {filename}: {e}")
-                        finally:
-                            if os.path.exists(temp_file):
-                                os.unlink(temp_file)
+                    if os.path.exists(database_file_path):
+                        os.remove(database_file_path)
+                        st.info("Database has been reset before batch import starts.")
                     else:
-                        st.error(f"Failed to download {filename} from GCS.")
-                    progress_bar.progress((idx + 1) / total_files_to_process)
+                        st.info("Database file not found, so no reset needed.")
+
+                # 2. Download all GCS files to the persistent temporary directory
+                with st.spinner(f"Downloading {len(gcs_files_to_process_overall)} file(s) from GCS..."):
+                    downloaded_map, failed_list = batch_download_from_bucket(gcs_files_to_process_overall, temp_dir_for_this_run)
+                    st.session_state.batch_downloaded_files_map = downloaded_map
+                    st.session_state.batch_failed_to_download_files = failed_list
+
+                if st.session_state.batch_failed_to_download_files:
+                    st.warning(f"{len(st.session_state.batch_failed_to_download_files)} file(s) could not be downloaded and will be skipped:")
+                    for failed_file in st.session_state.batch_failed_to_download_files:
+                        st.write(f"- {failed_file}")
                 
-                status_text.text("Import process completed!")
-                st.success("All selected files processed.")
+                st.session_state.batch_import_initial_setup_done = True
+                # We will process the first batch in this same run, so don't rerun yet unless no files downloaded
+                if not st.session_state.batch_downloaded_files_map:
+                    status_text_area.warning("No files were successfully downloaded. Nothing to import.")
+                    # Clean up and end batch mode
+                    if os.path.exists(temp_dir_for_this_run): shutil.rmtree(temp_dir_for_this_run)
+                    st.session_state.batch_import_temp_dir = None
+                    st.session_state.multi_batch_import_active = False
+                    st.session_state.batch_import_initial_setup_done = False 
+                    st.rerun()
+                    st.stop() # Should not be reached due to rerun
+            
+            # Determine files for the current actual processing batch
+            successfully_downloaded_gcs_filenames = list(st.session_state.batch_downloaded_files_map.keys())
+            files_for_this_processing_batch = successfully_downloaded_gcs_filenames[current_idx : current_idx + BATCH_SIZE]
+
+            if not files_for_this_processing_batch and current_idx >= len(successfully_downloaded_gcs_filenames) and len(successfully_downloaded_gcs_filenames) > 0:
+                # All files have been processed in previous batches
+                pass # Will proceed to finalization logic
+            elif not files_for_this_processing_batch and current_idx == 0 and not successfully_downloaded_gcs_filenames:
+                # This case handled by the initial download check, but as a safeguard
+                status_text_area.info("No files available to process.")
+            else:
+                status_text_area.info(f"Processing batch: files {current_idx + 1} to {min(current_idx + BATCH_SIZE, len(successfully_downloaded_gcs_filenames))} of {len(successfully_downloaded_gcs_filenames)} downloaded files.")
+                for i, gcs_filename in enumerate(files_for_this_processing_batch):
+                    local_filepath = st.session_state.batch_downloaded_files_map[gcs_filename]
+                    loop_progress_idx = current_idx + i
+                    status_text_area.text(f"Importing: {gcs_filename} ({loop_progress_idx + 1}/{len(successfully_downloaded_gcs_filenames)} of downloaded files)..." )
+                    progress_bar_area.progress((loop_progress_idx + 1) / len(successfully_downloaded_gcs_filenames))
+
+                    try:
+                        if os.path.exists(local_filepath) and os.path.getsize(local_filepath) > 0:
+                            stats = import_data(
+                                filepath=local_filepath,
+                                override=override_db,
+                                dry_run=perform_dry_run,
+                                reset_db=False, # Handled once at the start
+                                skip_backup=True, # Handled once at start and once at end
+                                original_filename=gcs_filename
+                            )
+                            if stats:
+                                accumulate_stats(total_stats, stats) 
+                                # Individual file summary can be verbose; consider removing or making it optional for batch mode
+                                # with st.expander(f"Details for {gcs_filename}", expanded=False):
+                                #    display_import_summary(stats, override_db, reset_db, perform_dry_run, is_final_summary=False, current_filename_for_display=gcs_filename)
+                            else:
+                                st.error(f"Failed to get import statistics for {gcs_filename}.")
+                        else:
+                            st.error(f"File {gcs_filename} (local: {local_filepath}) not found or is empty during processing batch.")
+                    except Exception as e:
+                        st.error(f"Error processing {gcs_filename} from {local_filepath}: {e}")
+                
+                st.session_state.batch_import_current_idx += len(files_for_this_processing_batch)
+
+            # Check if all files have been processed
+            if st.session_state.batch_import_current_idx >= len(successfully_downloaded_gcs_filenames):
+                # ---- FINALIZATION OF MULTI-BATCH IMPORT ----
+                status_text_area.success("All batches processed!")
+                progress_bar_area.empty()
+                
                 display_import_summary(total_stats, override_db, reset_db, perform_dry_run, is_final_summary=True)
                 
-                if not perform_dry_run:
-                    st.info("Creating backup of updated data...")
+                if not perform_dry_run and len(successfully_downloaded_gcs_filenames) > 0:
+                    status_text_area.info("Creating final backup of updated data...")
                     if backup_manager.run_backup():
-                        st.success("Backup completed successfully")
+                        st.success("Final backup completed successfully")
                         st.session_state.backup_list = list_gcs_backups()
                     else:
-                        st.warning("Backup failed, but data import was successful")
-            except Exception as e:
-                st.error(f"An error occurred during the import process: {e}")
-            finally:
-                progress_bar.empty()
-                status_text.empty()
-        
-        st.session_state.import_button_pressed = False
-        st.session_state.files_for_action = []
-        st.session_state.import_options = {}
+                        st.warning("Final backup failed, but data import (if any) was successful.")
+                
+                # Clean up persistent temporary directory
+                if temp_dir_for_this_run and os.path.exists(temp_dir_for_this_run):
+                    try:
+                        shutil.rmtree(temp_dir_for_this_run)
+                        st.write(f"DEBUG: Removed persistent temp dir: {temp_dir_for_this_run}") # DEBUG
+                    except Exception as e:
+                        st.warning(f"Could not remove batch import temporary directory {temp_dir_for_this_run}: {e}")
+                
+                # Reset batch import state
+                st.session_state.multi_batch_import_active = False
+                st.session_state.gcs_files_for_batch_import = []
+                st.session_state.batch_import_temp_dir = None
+                st.session_state.batch_downloaded_files_map = {}
+                st.session_state.batch_failed_to_download_files = []
+                st.session_state.batch_import_current_idx = 0
+                st.session_state.batch_import_total_stats = {}
+                st.session_state.batch_import_options = {}
+                st.session_state.batch_import_initial_setup_done = False
+                st.info("Batch import process complete.")
+                # No rerun here, allow user to see final messages.
+            else:
+                # More batches to process
+                status_text_area.info(f"Batch complete. Preparing for next batch...")
+                time.sleep(1) # Brief pause for user to see message
+                st.rerun() # Trigger next batch processing cycle
+
+        except Exception as e:
+            st.error(f"An critical error occurred during the batch import process: {e}")
+            st.warning("Batch import process aborted due to an unexpected error. Please check logs.")
+            # Attempt to clean up and reset state
+            if st.session_state.batch_import_temp_dir and os.path.exists(st.session_state.batch_import_temp_dir):
+                try: shutil.rmtree(st.session_state.batch_import_temp_dir) 
+                except: pass
+            st.session_state.multi_batch_import_active = False
+            st.session_state.gcs_files_for_batch_import = []
+            st.session_state.batch_import_temp_dir = None
+            st.session_state.batch_downloaded_files_map = {}
+            st.session_state.batch_failed_to_download_files = []
+            st.session_state.batch_import_current_idx = 0
+            st.session_state.batch_import_total_stats = {}
+            st.session_state.batch_import_options = {}
+            st.session_state.batch_import_initial_setup_done = False
+            st.rerun()
 
     if st.session_state.get('delete_button_pressed'):
         files_to_delete = st.session_state.files_for_action
         
         if not files_to_delete:
             st.warning("No files were selected for deletion.")
+            st.session_state.delete_button_pressed = False # Reset state
+            st.session_state.files_for_action = []
+            # No rerun needed if nothing to do, just clear flags.
         else:
-            st.info(f"Deletion process started for {len(files_to_delete)} file(s)...")
-            success_count = 0
-            error_count = 0
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            env = os.environ.copy()
-            env["CLOUDSDK_PYTHON"] = "python3.11"
+            st.info(f"Batch deletion process started for {len(files_to_delete)} file(s)...")
+            progress_placeholder = st.empty() # For potential detailed progress if needed in future
+            progress_placeholder.text(f"Attempting to delete {len(files_to_delete)} file(s) using a batch command...")
 
-            for idx, filename_to_delete in enumerate(files_to_delete):
-                status_text.text(f"Deleting file {idx + 1}/{len(files_to_delete)}: {filename_to_delete}...")
-                full_gcs_path = f"{BUCKET_URL}/{filename_to_delete}"
-                try:
-                    result = subprocess.run(
-                        ["gsutil", "rm", full_gcs_path],
-                        capture_output=True,
-                        text=True,
-                        check=True,
-                        env=env
-                    )
-                    success_count += 1
-                except subprocess.CalledProcessError as e:
-                    st.error(f"Error deleting {filename_to_delete}: {e.stderr}")
-                    error_count += 1
-                except Exception as e:
-                    st.error(f"Unexpected error deleting {filename_to_delete}: {str(e)}")
-                    error_count += 1
-                finally:
-                    progress_bar.progress((idx + 1) / len(files_to_delete))
-            
-            progress_bar.empty()
-            status_text.empty()
+            delete_results = delete_from_bucket(files_to_delete)
+            success_count = delete_results.get("success", 0)
+            error_count = delete_results.get("error", 0)
+
+            progress_placeholder.empty()
 
             if success_count > 0:
-                st.success(f"Successfully deleted {success_count} file(s).")
+                st.success(f"Successfully deleted {success_count} file(s) in batch from GCS.")
             if error_count > 0:
-                st.error(f"Failed to delete {error_count} file(s).")
+                # The error message from delete_from_bucket (st.error) would have already appeared.
+                # This is a summary count.
+                st.warning(f"Batch delete command indicated {error_count} file(s) could not be deleted or an error occurred.")
             
             if success_count > 0 or error_count > 0:
                 st.session_state.gcs_bucket_files = None 
@@ -1155,10 +1369,17 @@ with tab2:
                 st.session_state.delete_button_pressed = False
                 st.session_state.files_for_action = []
                 st.rerun() 
+            else: # No successes or errors reported, but files were selected
+                st.info("Delete command processed but reported no changes. Check GCS console if files still exist.")
+                st.session_state.delete_button_pressed = False
+                st.session_state.files_for_action = []
+                # Optionally rerun to clear selection, or allow user to try again
+                st.rerun()
         
-        # Reset state here as well, in case no rerun happened (e.g., no files to delete initially)
-        st.session_state.delete_button_pressed = False
-        st.session_state.files_for_action = []
+        # Fallback reset if somehow not covered (e.g., no files selected initially)
+        if st.session_state.delete_button_pressed: # Check if still true
+            st.session_state.delete_button_pressed = False
+            st.session_state.files_for_action = []
 
 with tab3:
     st.header("Backup Management")
@@ -1171,114 +1392,164 @@ with tab3:
                 st.success("Manual backup completed successfully")
                 # Refresh backup list after successful backup
                 st.session_state.backup_list = list_gcs_backups()
+                st.session_state.backup_management_df = None # Force DF rebuild
             else:
                 st.error("Manual backup failed")
     
-    # List backups
-    backups = st.session_state.backup_list
+    st.markdown("---") # Separator
+    st.subheader("Manage Backups in GCS")
+    # List backups - ensure it's up-to-date or refresh if needed
+    # (Consider adding a refresh button here if list_gcs_backups is not called frequently enough elsewhere)
+    backups_from_gcs = st.session_state.get('backup_list', []) # Use the cached list
+    if not backups_from_gcs: # If cache is empty or None, try to load
+        with st.spinner("Refreshing backup list from GCS..."):
+            st.session_state.backup_list = list_gcs_backups()
+            backups_from_gcs = st.session_state.backup_list
+            st.session_state.backup_management_df = None # Force DF rebuild since list was reloaded
 
-    # Create a DataFrame for better display
-    backup_df = pd.DataFrame(backups)
-    # Ensure the DataFrame maintains the sorted order
-    if not backup_df.empty:
-        backup_df = backup_df[['display_date', 'environment', 'db_rows']]
-        backup_df.columns = ['Date & Time', 'Environment', 'DB Rows']
+    # Prepare DataFrame for data_editor, managing its state across reruns
+    rebuild_backup_df = False
+    if st.session_state.backup_management_df is None:
+        rebuild_backup_df = True
     else:
-        # If backups is empty, create an empty DataFrame with the correct columns
-        backup_df = pd.DataFrame(columns=['Date & Time', 'Environment', 'DB Rows'])
-    # Add a checkbox column on the left
-    backup_df.insert(0, 'Select', False)
+        # Check if the number of backups changed
+        if len(st.session_state.backup_management_df) != len(backups_from_gcs):
+            rebuild_backup_df = True
+        # Check if the filenames themselves changed (more robust check needed if order isn't guaranteed)
+        elif set(st.session_state.backup_management_df['Filename']) != set(b['filename'] for b in backups_from_gcs):
+            rebuild_backup_df = True
+
+    if rebuild_backup_df:
+        if backups_from_gcs:
+            temp_backup_df = pd.DataFrame(backups_from_gcs)
+            # Ensure the DataFrame maintains the sorted order from list_gcs_backups (most recent first)
+            temp_backup_df = temp_backup_df[['filename', 'display_date', 'environment', 'db_rows']]
+            temp_backup_df.columns = ['Filename', 'Date & Time', 'Environment', 'DB Rows']
+            temp_backup_df.insert(0, 'Select', False) # Initialize Select column
+            st.session_state.backup_management_df = temp_backup_df.copy()
+        else:
+            st.session_state.backup_management_df = pd.DataFrame(columns=['Select', 'Filename', 'Date & Time', 'Environment', 'DB Rows'])
+
+    if st.session_state.backup_management_df is not None and not st.session_state.backup_management_df.empty:
+        st.write(f"Found {len(backups_from_gcs)} backups:")
+
+        # "Select All" / "Deselect All" buttons for backups
+        col_select_all_backups, col_deselect_all_backups = st.columns(2)
+        with col_select_all_backups:
+            if st.button("Select All Backups", key="select_all_backup_files"):
+                st.session_state.backup_management_df['Select'] = True
+                st.session_state.backup_management_editor_key += 1
+                st.rerun()
+        with col_deselect_all_backups:
+            if st.button("Deselect All Backups", key="deselect_all_backup_files"):
+                st.session_state.backup_management_df['Select'] = False
+                st.session_state.backup_management_editor_key += 1
+                st.rerun()
+
+        df_snapshot_before_backup_editor = st.session_state.backup_management_df.copy()
+        
+        edited_backup_df = st.data_editor(
+            st.session_state.backup_management_df,
+            use_container_width=True,
+            hide_index=True,
+            key=f"backup_management_data_editor_{st.session_state.backup_management_editor_key}",
+            column_config={
+                "Select": st.column_config.CheckboxColumn(
+                    "Select",
+                    help="Select backups to act on",
+                    default=False,
+                ),
+                "Filename": st.column_config.TextColumn(
+                    "Filename",
+                    width="medium",
+                ),
+                "Date & Time": st.column_config.TextColumn(
+                    "Date & Time",
+                    width="medium",
+                ),
+                "Environment": st.column_config.TextColumn(
+                    "Environment",
+                    width="small",
+                ),
+                "DB Rows": st.column_config.TextColumn(
+                    "DB Rows",
+                    help="Number of rows in the podcasts table of the backup (N/A for older backups)",
+                    width="small",
+                )
+            },
+            disabled=["Filename", "Date & Time", "Environment", "DB Rows"],
+        )
+        
+        st.session_state.backup_management_df = edited_backup_df.copy()
+
+        if not df_snapshot_before_backup_editor.equals(st.session_state.backup_management_df):
+            st.session_state.backup_management_editor_key += 1
+            st.rerun()
+
+        # Get selected backups from the editor's output (which is now in session state)
+        selected_backup_filenames_from_editor = [
+            st.session_state.backup_management_df.iloc[i]['Filename'] 
+            for i, selected in enumerate(st.session_state.backup_management_df['Select']) if selected
+        ]
+        # Map filenames back to the full backup objects for actions
+        selected_backups_for_action = [b for b in backups_from_gcs if b['filename'] in selected_backup_filenames_from_editor]
+
+    else:
+        st.info("No backups found in GCS (or cache is empty/being refreshed).")
+        selected_backups_for_action = [] # Ensure it's defined if there are no backups
     
-    st.write(f"Found {len(backups)} backups:")
-    
-    # Display backups in a table with checkboxes
-    edited_df = st.data_editor(
-        backup_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Select": st.column_config.CheckboxColumn(
-                "Select",
-                help="Select backups to act on",
-                default=False,
-            ),
-            "Date & Time": st.column_config.TextColumn(
-                "Date & Time",
-                width="medium",
-            ),
-            "Environment": st.column_config.TextColumn(
-                "Environment",
-                width="small",
-            ),
-            "DB Rows": st.column_config.TextColumn(
-                "DB Rows",
-                help="Number of rows in the podcasts table of the backup (N/A for older backups)",
-                width="small",
-            )
-        },
-        disabled=["Date & Time", "Environment", "DB Rows"],
-    )
-    
-    # Get selected backups
-    selected_backups = [backups[i] for i, selected in enumerate(edited_df['Select']) if selected]
-    
-    # --- EXAMINE PANEL ---
+    # --- EXAMINE PANEL --- (Operates on selected_backups_for_action)
     st.markdown("---")
     st.subheader("Examine Backup")
-    if len(selected_backups) == 1:
-        if st.button("Examine Selected Backup", key="examine_selected_backup"):
+    if len(selected_backups_for_action) == 1:
+        if st.button("Examine Selected Backup", key="examine_selected_backup_btn"):
             import tempfile, sqlite3, tarfile
-            import pathlib
-            st.info(f"Examining backup: {selected_backups[0]['filename']}")
+            import pathlib # pathlib was imported but not used, keeping it for now if needed later
+            st.info(f"Examining backup: {selected_backups_for_action[0]['filename']}")
             try:
                 env = os.environ.copy()
                 env["CLOUDSDK_PYTHON"] = "python3.11"
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    temp_file = os.path.join(tmpdir, "selected_backup.tar.gz")
+                    temp_file_examine = os.path.join(tmpdir, "selected_backup_examine.tar.gz")
                     subprocess.run([
-                        "gsutil", "cp", selected_backups[0]['url'], temp_file
-                    ], check=True, env=env)
+                        "gsutil", "cp", selected_backups_for_action[0]['url'], temp_file_examine
+                    ], check=True, env=env, capture_output=True, text=True)
                     # Extract all files
-                    with tarfile.open(temp_file, "r:gz") as tar:
+                    with tarfile.open(temp_file_examine, "r:gz") as tar:
                         tar.extractall(path=tmpdir)
                     
                     # Check for config file
                     config_found = False
-                    config_path = None
+                    config_path_examine = None
                     for root, dirs, files in os.walk(tmpdir):
                         if "config.yaml" in files:
-                            config_path = os.path.join(root, "config.yaml")
+                            config_path_examine = os.path.join(root, "config.yaml")
                             config_found = True
                             break
                     
                     if config_found:
                         st.info("✅ Config file found in backup")
-                        # Read and display config contents
-                        with open(config_path, 'r') as f:
+                        with open(config_path_examine, 'r') as f:
                             config_content = yaml.safe_load(f)
-                            # st.write("### Config File Contents") # Removed detailed display
-                            # st.json(config_content) # Removed detailed display
                             num_users = len(config_content.get('credentials', {}).get('usernames', {}))
                             st.info(f"Total users in backup config: {num_users}")
                     else:
                         st.error("❌ Config file not found in backup!")
                     
                     # Check for database
-                    db_path = None
+                    db_path_examine = None
                     for root, dirs, files in os.walk(tmpdir):
                         if "podcasts.db" in files:
-                            db_path = os.path.join(root, "podcasts.db")
+                            db_path_examine = os.path.join(root, "podcasts.db")
                             break
                     
-                    if db_path and os.path.exists(db_path):
-                        conn = sqlite3.connect(db_path)
+                    if db_path_examine and os.path.exists(db_path_examine):
+                        conn = sqlite3.connect(db_path_examine)
                         cur = conn.cursor()
-                        # Get all table names
                         cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
                         tables = [row[0] for row in cur.fetchall()]
                         st.write("### Database Contents")
                         st.write(f"Tables in backup: {tables}")
-                        # Show row count for each table
                         for table in tables:
                             try:
                                 cur.execute(f"SELECT COUNT(*) FROM {table};")
@@ -1289,146 +1560,210 @@ with tab3:
                         conn.close()
                     else:
                         st.warning("No podcasts.db found in backup archive after extraction.")
+            except subprocess.CalledProcessError as spe:
+                st.error(f"Error examining backup (command failed): {spe.stderr}")
             except Exception as e:
                 st.warning(f"Could not examine backup: {e}")
-    elif len(selected_backups) > 1:
+    elif len(selected_backups_for_action) > 1:
         st.warning("Please select only one backup to examine.")
     else:
-        st.info("Select a single backup to examine its database stats.")
+        st.info("Select a single backup from the table above to examine its details.")
     
-    # --- DELETE PANEL ---
+    # --- DELETE PANEL --- (Operates on selected_backups_for_action)
     st.markdown("---")
     st.subheader("Delete Backups")
-    if selected_backups:
-        confirm_delete = st.checkbox("I understand this will permanently delete the selected backups.", key="confirm_delete_backups")
-        if st.button("Delete Selected Backups", key="delete_selected_backups"):
-            if confirm_delete:
+    if selected_backups_for_action:
+        st.warning(f"{len(selected_backups_for_action)} backup(s) selected for deletion.")
+        confirm_delete_backups_checkbox = st.checkbox("I understand this will permanently delete the selected backups from GCS.", key="confirm_delete_backups_checkbox")
+        
+        if st.button("Delete Selected Backups from GCS", key="delete_selected_backups_btn"):
+            if confirm_delete_backups_checkbox:
                 env = os.environ.copy()
                 env["CLOUDSDK_PYTHON"] = "python3.11"
-                try:
-                    for backup in selected_backups:
-                        subprocess.run([
-                            "gsutil", "rm", backup['url']
-                        ], check=True, env=env)
-                    st.success(f"Deleted {len(selected_backups)} backup(s) from GCS.")
-                    # Refresh backup list after deletion
-                    st.session_state.backup_list = list_gcs_backups()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error deleting backups: {str(e)}")
+                gcs_urls_to_delete = [backup['url'] for backup in selected_backups_for_action]
+                
+                if not gcs_urls_to_delete:
+                    st.warning("No backup URLs found for deletion (this shouldn't happen if files were selected).")
+                else:
+                    progress_placeholder_delete = st.empty()
+                    progress_placeholder_delete.info(f"Attempting to delete {len(gcs_urls_to_delete)} backup(s) using a batch command...")
+                    
+                    try:
+                        # Command: gsutil -m rm gs://bucket/backup1.tar.gz gs://bucket/backup2.tar.gz ...
+                        cmd_delete = ["gsutil", "-m", "rm"] + gcs_urls_to_delete
+                        
+                        result_delete = subprocess.run(
+                            cmd_delete,
+                            capture_output=True,
+                            text=True,
+                            check=False, # Check stderr and return code manually for -m
+                            env=env
+                        )
+                        
+                        # gsutil -m rm usually exits with 0 if all operations are successful or if some files specified didn't exist.
+                        # It exits with non-zero if there was a more serious error or if some files that did exist could not be removed.
+                        # A robust check would parse stderr for "Removing gs://..." and "Problem removing gs://..."
+                        # For simplicity, we'll assume success if returncode is 0 and check stderr for explicit problem reports.
+                        
+                        failed_deletions = 0
+                        if result_delete.returncode != 0 or "Problem removing" in result_delete.stderr:
+                            # Count how many might have failed based on "Problem removing" or if the command itself errored.
+                            # This is an approximation unless we parse each line.
+                            # If command failed broadly, assume all failed.
+                            if result_delete.returncode != 0:
+                                failed_deletions = len(gcs_urls_to_delete)
+                                st.error(f"Batch GCS delete command failed. Exit code: {result_delete.returncode}. Stderr: {result_delete.stderr[:500]}...")
+                            else: # returncode 0 but "Problem removing" in stderr means partial failure
+                                # This part is tricky without specific gsutil output format guarantees
+                                # We will rely on user checking GCS for now in this specific partial failure case
+                                st.warning(f"gsutil reported some issues during batch delete. Some files may not have been deleted. Stderr: {result_delete.stderr[:500]}...")
+                                # To be more precise, one would count "Problem removing" lines.
+                                # For now, we can't accurately say how many failed vs succeeded in this mixed scenario from `gsutil -m` easily.
+                                # We will assume all were attempted, and if stderr has problems, some failed.
+                                # Let's count successful ones as total - those with "Problem removing". This is a basic heuristic.
+                                problem_lines = [line for line in result_delete.stderr.splitlines() if "Problem removing" in line]
+                                failed_deletions = len(problem_lines)
+
+                        succeeded_deletions = len(gcs_urls_to_delete) - failed_deletions
+
+                        progress_placeholder_delete.empty()
+
+                        if succeeded_deletions > 0:
+                            st.success(f"Successfully initiated deletion for {succeeded_deletions} backup(s) (or they were already gone).")
+                        if failed_deletions > 0:
+                            st.error(f"{failed_deletions} backup(s) may have failed to delete or encountered an issue.")
+                        if succeeded_deletions == 0 and failed_deletions == 0 and gcs_urls_to_delete: # Command ran, no errors, no successes reported
+                            st.info("Batch delete command ran, but gsutil reported no specific successes or failures. Please verify in GCS.")
+
+                        # Refresh backup list from GCS and editor state
+                        st.session_state.backup_list = list_gcs_backups()
+                        st.session_state.backup_management_df = None # Force DF rebuild
+                        st.session_state.backup_management_editor_key +=1 # Refresh editor
+                        st.rerun()
+                            
+                    except FileNotFoundError: # gsutil not found
+                        progress_placeholder_delete.empty()
+                        st.error("gsutil command not found. Please ensure Google Cloud SDK is installed and in PATH.")
+                    except Exception as e_delete:
+                        progress_placeholder_delete.empty()
+                        st.error(f"Unexpected error during batch GCS backup delete: {str(e_delete)}")
             else:
                 st.warning("Please confirm deletion by checking the box above.")
     else:
-        st.info("Select one or more backups to delete.")
+        st.info("Select one or more backups from the table above to enable the delete option.")
     
-    # --- RESTORE PANEL ---
+    # --- RESTORE PANEL --- (Operates on selected_backups_for_action)
     st.markdown("---")
     st.subheader("Restore Backup")
 
-    if len(selected_backups) == 1:
-        backup_to_restore = selected_backups[0]
+    if len(selected_backups_for_action) == 1:
+        backup_to_restore = selected_backups_for_action[0]
         st.info(f"Selected for restore: {backup_to_restore['filename']} ({backup_to_restore['environment']}, DB Rows: {backup_to_restore['db_rows']})")
-        if st.button(f"Restore Backup: {backup_to_restore['filename']}", key="restore_selected_backup_from_table"):
+        if st.button(f"Restore Backup: {backup_to_restore['filename']}", key="restore_selected_backup_btn"):
             try:
                 with st.spinner(f"Restoring backup: {backup_to_restore['filename']}..."):
                     env = os.environ.copy()
                     env["CLOUDSDK_PYTHON"] = "python3.11"
                     
                     # Determine restore directory based on environment
-                    if os.path.exists("/app/data"):
-                        restore_dir = "/app/data"
-                    else:
-                        restore_dir = os.path.join(os.getcwd(), "data")
+                    restore_base_dir = data_dir # Use data_dir defined at the top
+                    config_base_dir = os.path.abspath(os.path.join('.', 'config')) # Relative to app root for config
+                    if os.path.exists("/app/data"): # Cloud specific paths if needed
+                        restore_base_dir = "/app/data"
+                        config_base_dir = "/app/config" 
                     
-                    # Create temp directory for extraction
-                    temp_dir = os.path.join(restore_dir, "temp_restore_extraction") # Unique temp dir name
-                    os.makedirs(temp_dir, exist_ok=True)
-                    
-                    temp_file = os.path.join(temp_dir, "selected_backup_to_restore.tar.gz")
-                    subprocess.run(
-                        ["gsutil", "cp", backup_to_restore['url'], temp_file],
-                        check=True,
-                        env=env,
-                        capture_output=True, text=True
-                    )
-                    
-                    # Extract to temp directory first
-                    extract_dir = os.path.join(temp_dir, "extract")
-                    os.makedirs(extract_dir, exist_ok=True)
-                    
-                    subprocess.run(
-                        ["tar", "-xzf", temp_file, "-C", extract_dir],
-                        check=True,
-                        capture_output=True, text=True
-                    )
-                    
-                    # Move files to the correct location
-                    db_found_in_restore = False
-                    config_found_in_restore = False
-                    for root, dirs, files_in_root in os.walk(extract_dir):
-                        # Restore podcasts.db
-                        if "podcasts.db" in files_in_root:
-                            src_db = os.path.join(root, "podcasts.db")
-                            dest_db = os.path.join(restore_dir, "podcasts.db")
-                            # Ensure data directory exists
-                            os.makedirs(os.path.dirname(dest_db), exist_ok=True)
-                            shutil.move(src_db, dest_db)
-                            db_found_in_restore = True
-                        # Restore config.yaml
-                        if "config.yaml" in files_in_root:
-                            # Determine config directory
-                            if os.path.exists("/app/config"):
-                                config_dir_restore = "/app/config"
-                            else:
-                                config_dir_restore = os.path.join(os.getcwd(), "config")
-                            os.makedirs(config_dir_restore, exist_ok=True)
-                            src_config = os.path.join(root, "config.yaml")
-                            dest_config = os.path.join(config_dir_restore, "config.yaml")
-                            shutil.move(src_config, dest_config)
-                            os.chmod(dest_config, 0o600) # Ensure correct permissions
-                            config_found_in_restore = True
-                    
-                    # Clean up temp files
-                    shutil.rmtree(temp_dir)
-                    
-                    if db_found_in_restore:
-                        st.success(f"Successfully restored database from backup: {backup_to_restore['display_date']}")
-                        if config_found_in_restore:
-                            st.info("Config file was also restored from backup.")
-                            print("[DEBUG] ADMIN: Config restored. Forcing auth reset and page refresh.")
-                            # Force a full reset of authentication state
-                            st.session_state.auth_initialized = False
-                            st.session_state.authenticator = None
-                            st.session_state.config = None
-                            st.session_state.authentication_status = None
-                            st.session_state.name = None
-                            st.session_state.username = None
+                    # Create temp directory for extraction inside the workspace or a known writable area
+                    # Using tempfile.TemporaryDirectory for safer management
+                    with tempfile.TemporaryDirectory(prefix="orionx_restore_") as temp_dir_restore:
+                        temp_archive_path = os.path.join(temp_dir_restore, "selected_backup_to_restore.tar.gz")
+                        
+                        # Download
+                        dl_result = subprocess.run(
+                            ["gsutil", "cp", backup_to_restore['url'], temp_archive_path],
+                            check=True,
+                            env=env,
+                            capture_output=True, text=True
+                        )
+                        
+                        # Extract to a sub-directory within the temp directory
+                        extract_target_dir = os.path.join(temp_dir_restore, "extracted_content")
+                        os.makedirs(extract_target_dir, exist_ok=True)
+                        
+                        tar_result = subprocess.run(
+                            ["tar", "-xzf", temp_archive_path, "-C", extract_target_dir],
+                            check=True,
+                            capture_output=True, text=True
+                        )
+                        
+                        # Find and move files
+                        db_found_in_restore = False
+                        config_found_in_restore = False
+                        items_moved_count = 0
+
+                        for root, dirs, files_in_root in os.walk(extract_target_dir):
+                            if "podcasts.db" in files_in_root:
+                                src_db = os.path.join(root, "podcasts.db")
+                                dest_db = os.path.join(restore_base_dir, "podcasts.db")
+                                os.makedirs(os.path.dirname(dest_db), exist_ok=True)
+                                # Backup existing DB before overwriting
+                                if os.path.exists(dest_db):
+                                    backup_existing_db_path = dest_db + f".backup_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                                    shutil.move(dest_db, backup_existing_db_path)
+                                    st.info(f"Backed up existing database to: {backup_existing_db_path}")
+                                shutil.move(src_db, dest_db)
+                                db_found_in_restore = True
+                                items_moved_count += 1
                             
-                            # Inform user and stop to allow manual refresh, which is more reliable
-                            st.warning("Restore complete. Please REFRESH your browser page to apply changes and log in.")
-                            st.stop() # Stop execution to force refresh
+                            if "config.yaml" in files_in_root:
+                                src_config = os.path.join(root, "config.yaml")
+                                dest_config = os.path.join(config_base_dir, "config.yaml")
+                                os.makedirs(os.path.dirname(dest_config), exist_ok=True)
+                                # Backup existing config before overwriting
+                                if os.path.exists(dest_config):
+                                    backup_existing_config_path = dest_config + f".backup_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                                    shutil.move(dest_config, backup_existing_config_path)
+                                    st.info(f"Backed up existing config to: {backup_existing_config_path}")
+                                shutil.move(src_config, dest_config)
+                                if not os.name == 'nt': # Skip chmod on Windows
+                                    os.chmod(dest_config, 0o600) # Ensure correct permissions
+                                config_found_in_restore = True
+                                items_moved_count += 1
+                        
+                        # Temp directory and its contents (downloaded archive, extracted files not moved) are auto-cleaned by TemporaryDirectory context manager
+
+                        if items_moved_count == 0:
+                            st.error("Restore process ran, but no 'podcasts.db' or 'config.yaml' were found in the backup archive.")
                         else:
-                            st.warning("Config file was NOT found in the backup archive. Database restored, but login/config may be affected if it was part of the backup intent.")
-                            st.info("If config was expected, manual check or app restart might be needed.")
-                    else:
-                        st.error("Restore completed, but podcasts.db was not found in the backup archive.")
+                            if db_found_in_restore:
+                                st.success(f"Successfully restored database from backup: {backup_to_restore['display_date']}")
+                            else:
+                                st.warning("Database (podcasts.db) was NOT found in the backup archive.")
+                            
+                            if config_found_in_restore:
+                                st.success("Config file (config.yaml) was also restored from backup.")
+                                st.warning("IMPORTANT: Config file has been restored. You will be logged out. Please REFRESH your browser page to apply changes and log back in.")
+                                # Force a full reset of authentication state for security and consistency
+                                for key in list(st.session_state.keys()):
+                                    if key in ['authentication_status', 'name', 'username', 'authenticator', 'config']:
+                                        del st.session_state[key]
+                                # Set a flag that login is required, if your app uses such a flag elsewhere.
+                                # st.session_state.login_required = True # Example
+                                st.stop() # Stop execution to force user to refresh and re-login
+                            else:
+                                st.warning("Config file (config.yaml) was NOT found in the backup archive.")
+
             except subprocess.CalledProcessError as spe:
                 st.error(f"Error during restore (command execution failed): {spe.stderr}")
+                if spe.stdout:
+                    st.error(f"Stdout: {spe.stdout}")
             except Exception as e:
                 st.error(f"Error restoring backup: {str(e)}")
-    elif len(selected_backups) > 1:
+    elif len(selected_backups_for_action) > 1:
         st.warning("Please select only one backup to restore.")
-    else: # 0 selected, or if 'backups' itself is empty
-        if not backups: # Check if there are any backups listed at all
+    else: # 0 selected, or if 'backups_from_gcs' itself is empty
+        if not backups_from_gcs:
             st.info("No backups found in Cloud Storage yet.")
         else:
             st.info("Select a single backup from the table above to enable the restore option.")
 
-    # The old selectbox-based restore logic is now removed by virtue of not being included here.
-    # Ensure the following lines which defined the old st.selectbox and its logic are effectively replaced/removed.
-    # if backups:
-    #     selected_backup_old_selectbox = st.selectbox(
-    #         "Select a backup to restore",
-    # ... (rest of old logic) ...
-    # else:
-    #     st.info("No backups found in Cloud Storage yet.") 
+    # The old selectbox-based restore logic is now removed.
